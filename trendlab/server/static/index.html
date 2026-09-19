@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TrendLab</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 12l4-5 3 3 4-7 3 4' stroke='%232a78d6' stroke-width='2' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand">
+      <h1>TrendLab</h1>
+      <p>Trend analysis, market-regime detection and probabilistic forecasting</p>
+    </div>
+    <div class="field">
+      <label for="symbol">Symbol</label>
+      <input id="symbol" value="AAPL" placeholder="AAPL / RELIANCE.NS" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="period">History</label>
+      <select id="period">
+        <option value="2y">2 years</option>
+        <option value="3y">3 years</option>
+        <option value="5y" selected>5 years</option>
+        <option value="10y">10 years</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="horizon">Horizon</label>
+      <select id="horizon">
+        <option value="1">1 day</option>
+        <option value="5" selected>5 days</option>
+        <option value="10">10 days</option>
+        <option value="21">21 days</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="provider">Source</label>
+      <select id="provider">
+        <option value="yahoo" selected>Yahoo (live)</option>
+        <option value="synthetic">Synthetic (demo)</option>
+      </select>
+    </div>
+    <button id="run">Analyze</button>
+    <button id="theme" class="ghost" title="Toggle light / dark">◐</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="notice">
+    <span class="icon" aria-hidden="true">!</span>
+    <span><strong>Research tooling, not financial advice.</strong> Every number here is
+    derived from past prices. Markets are not obliged to repeat themselves — treat the
+    forecast as a probability with a track record attached, never as a price target.</span>
+  </div>
+
+  <div id="status"></div>
+  <main id="report" hidden></main>
+</div>
+
+<footer>TrendLab · built for analysis, not for certainty</footer>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

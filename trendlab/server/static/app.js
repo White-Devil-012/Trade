@@ -20,6 +20,90 @@ $('theme').addEventListener('click', () => {
   if (lastReport) render(lastReport); // SVG strokes resolve tokens at paint time
 });
 
+/* ---------------- symbol search ---------------- */
+const escHtml = (t) => String(t).replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const suggestBox = $('suggest');
+let suggestions = [];
+let activeIndex = -1;
+let searchTimer = null;
+
+function closeSuggest() {
+  suggestBox.hidden = true;
+  suggestBox.innerHTML = '';
+  suggestions = [];
+  activeIndex = -1;
+  $('symbol').setAttribute('aria-expanded', 'false');
+}
+
+function renderSuggest() {
+  if (!suggestions.length) {
+    suggestBox.innerHTML = '<li class="s-empty">No match. Try the ticker itself, e.g. RELIANCE.NS</li>';
+  } else {
+    suggestBox.innerHTML = suggestions.map((r, i) => `
+      <li role="option" data-i="${i}" aria-selected="${i === activeIndex}">
+        <span class="s-sym">${escHtml(r.symbol)}</span>
+        <span class="s-name">${escHtml(r.name)}</span>
+        <span class="s-kind">${escHtml(r.kind === 'fund' ? 'mutual fund' : r.exchange || r.kind)}</span>
+      </li>`).join('');
+  }
+  suggestBox.hidden = false;
+  $('symbol').setAttribute('aria-expanded', 'true');
+}
+
+function choose(i) {
+  const hit = suggestions[i];
+  if (!hit) return;
+  $('symbol').value = hit.symbol;
+  closeSuggest();
+  run();
+}
+
+suggestBox.addEventListener('mousedown', (e) => {
+  // mousedown, not click: blur would close the list before click lands.
+  const li = e.target.closest('li[data-i]');
+  if (li) { e.preventDefault(); choose(Number(li.dataset.i)); }
+});
+
+$('symbol').addEventListener('input', () => {
+  const q = $('symbol').value.trim();
+  clearTimeout(searchTimer);
+  if (q.length < 2) { closeSuggest(); return; }
+  searchTimer = setTimeout(async () => {
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      if (!res.ok) return closeSuggest();
+      suggestions = (await res.json()).results || [];
+      activeIndex = -1;
+      renderSuggest();
+    } catch {
+      closeSuggest();
+    }
+  }, 180);
+});
+
+$('symbol').addEventListener('keydown', (e) => {
+  if (suggestBox.hidden) {
+    if (e.key === 'Enter') run();
+    return;
+  }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    activeIndex = (activeIndex + step + suggestions.length) % (suggestions.length || 1);
+    renderSuggest();
+    suggestBox.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    activeIndex >= 0 ? choose(activeIndex) : (closeSuggest(), run());
+  } else if (e.key === 'Escape') {
+    closeSuggest();
+  }
+});
+
+$('symbol').addEventListener('blur', () => setTimeout(closeSuggest, 120));
+
 /* ---------------- helpers ---------------- */
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -72,7 +156,6 @@ async function run() {
 }
 
 $('run').addEventListener('click', run);
-$('symbol').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
 
 /* ---------------- rendering ---------------- */
 function render(r) {
@@ -84,12 +167,11 @@ function render(r) {
     ${tilesHtml(r)}
     ${regimeHtml(r)}
     <section class="panel">
-      <h2>Price & moving averages</h2>
-      <p class="sub">${esc(r.symbol)} · ${s.dates.length} sessions to ${esc(r.as_of)}. Shaded band = Bollinger (20, 2σ).</p>
+      <h2>${r.asset_kind === 'fund' ? 'NAV &amp; moving averages' : 'Price &amp; moving averages'}</h2>
+      <p class="sub">${esc(r.display_name || r.symbol)} · ${s.dates.length} sessions to ${esc(r.as_of)}. Shaded band = Bollinger (20, 2σ).</p>
       <div class="legend" id="lg-price"></div>
       <div class="chart" id="ch-price"></div>
-      <h2 style="margin-top:18px">Volume</h2>
-      <div class="chart" id="ch-volume"></div>
+      ${r.has_volume ? '<h2 style="margin-top:18px">Volume</h2><div class="chart" id="ch-volume"></div>' : ''}
     </section>
     <div class="grid-2">
       <section class="panel">
@@ -112,7 +194,7 @@ function render(r) {
   `;
 
   drawPrice(s);
-  drawVolume(s);
+  if (r.has_volume) drawVolume(s);
   drawRsi(s);
   drawMacd(s);
   drawEquity(r.backtest.equity);
@@ -129,7 +211,7 @@ function tilesHtml(r) {
   return `<div class="tiles">
     <div class="tile"><div class="label">Last close</div>
       <div class="value">${fmtNum(r.last_close)}</div>
-      <div class="note">as of ${esc(r.as_of)}</div></div>
+      <div class="note">${r.asset_kind === 'fund' ? 'NAV · ' : ''}as of ${esc(r.as_of)}</div></div>
     <div class="tile"><div class="label">1 day</div>
       <div class="value ${deltaClass(r.change_1d)}">${fmtSignedPct(r.change_1d)}</div>
       <div class="note">session change</div></div>
@@ -151,7 +233,8 @@ function regimeHtml(r) {
       <span class="badge">${statusDot(TREND_STATUS[g.trend] || 'var(--text-muted)')}<span class="k">Trend</span><span class="v">${title(g.trend)}</span></span>
       <span class="badge">${statusDot(VOL_STATUS[g.volatility] || 'var(--text-muted)')}<span class="k">Volatility</span><span class="v">${title(g.volatility)}</span></span>
       <span class="badge"><span class="k">Momentum</span><span class="v">${title(g.momentum)}</span></span>
-      <span class="badge"><span class="k">Volume flow</span><span class="v">${title(g.participation)}</span></span>
+      ${g.participation === 'not_applicable' ? '' :
+        `<span class="badge"><span class="k">Volume flow</span><span class="v">${title(g.participation)}</span></span>`}
       <span class="badge"><span class="k">Drawdown</span><span class="v">${title(g.drawdown_state)}</span></span>
     </div>
     <p class="small muted">Regime is descriptive, not predictive: it tells you which playbook the
@@ -284,13 +367,13 @@ function tableHtml(r) {
     rows.push(`<tr><td>${s.dates[i]}</td><td>${fmtNum(s.close[i])}</td>
       <td>${fmtNum(s.sma_20?.[i])}</td><td>${fmtNum(s.sma_50?.[i])}</td>
       <td>${fmtNum(s.sma_200?.[i])}</td><td>${fmtNum(s.rsi_14?.[i], 1)}</td>
-      <td>${fmtNum(s.volume[i], 0)}</td></tr>`);
+      ${r.has_volume ? `<td>${fmtNum(s.volume[i], 0)}</td>` : ''}</tr>`);
   }
   return `<section class="panel">
     <h2>Data table — last 60 sessions</h2>
     <p class="sub">The same numbers behind the charts, for readers who need values rather than shapes.</p>
     <div class="table-scroll"><table>
-      <thead><tr><th>Date</th><th>Close</th><th>SMA 20</th><th>SMA 50</th><th>SMA 200</th><th>RSI</th><th>Volume</th></tr></thead>
+      <thead><tr><th>Date</th><th>Close</th><th>SMA 20</th><th>SMA 50</th><th>SMA 200</th><th>RSI</th>${r.has_volume ? '<th>Volume</th>' : ''}</tr></thead>
       <tbody>${rows.reverse().join('')}</tbody>
     </table></div>
   </section>`;

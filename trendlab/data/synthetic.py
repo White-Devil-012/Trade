@@ -23,6 +23,9 @@ class SyntheticProvider:
 
     def history(self, symbol: str, period: str = "5y", interval: str = "1d") -> PriceHistory:
         n = _PERIOD_TO_DAYS.get(period, 1260)
+        # An "MF:" symbol yields a NAV-shaped series (no OHLC spread, no
+        # volume), so the mutual fund path is exercisable with no network.
+        as_fund = str(symbol).strip().upper().startswith("MF:")
         # Seed from the symbol so the same ticker always yields the same series.
         rng = np.random.default_rng(abs(hash(symbol)) % (2**32))
 
@@ -54,8 +57,15 @@ class SyntheticProvider:
         volume = rng.lognormal(mean=14.0, sigma=0.35, size=n) * (1 + 3 * np.abs(daily_ret))
 
         index = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n)
-        frame = pd.DataFrame(
-            {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
-            index=index,
-        )
+        if as_fund:
+            nan = np.full(n, np.nan)
+            frame = pd.DataFrame(
+                {"open": close, "high": close, "low": close, "close": close, "volume": nan},
+                index=index,
+            )
+        else:
+            frame = pd.DataFrame(
+                {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+                index=index,
+            )
         return normalize(frame, symbol)

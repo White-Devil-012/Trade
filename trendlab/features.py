@@ -15,7 +15,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-FEATURE_COLUMNS = [
+# Features that need only price. A mutual fund NAV series has these and nothing
+# more -- a fund prices once a day with no traded volume.
+PRICE_FEATURE_COLUMNS = [
     "rsi_14",
     "macd_hist_norm",
     "bb_pct",
@@ -30,8 +32,6 @@ FEATURE_COLUMNS = [
     "dist_sma_50",
     "dist_sma_200",
     "sma_50_200_spread",
-    "volume_ratio",
-    "obv_slope_norm",
     "ret_1",
     "ret_5",
     "ret_21",
@@ -40,8 +40,22 @@ FEATURE_COLUMNS = [
     "mom_accel",
 ]
 
+# Only meaningful where something actually trades.
+VOLUME_FEATURE_COLUMNS = ["volume_ratio", "obv_slope_norm"]
 
-def build(frame: pd.DataFrame) -> pd.DataFrame:
+FEATURE_COLUMNS = PRICE_FEATURE_COLUMNS + VOLUME_FEATURE_COLUMNS
+
+
+def feature_columns(has_volume: bool = True) -> list[str]:
+    """The feature set for this asset class.
+
+    Dropping the volume columns for funds is what keeps them trainable: leaving
+    them in makes every row incomplete, and the dataset comes back empty.
+    """
+    return list(FEATURE_COLUMNS) if has_volume else list(PRICE_FEATURE_COLUMNS)
+
+
+def build(frame: pd.DataFrame, has_volume: bool = True) -> pd.DataFrame:
     """Derive the model features from an indicator-enriched frame."""
     f = frame
     out = pd.DataFrame(index=f.index)
@@ -73,7 +87,7 @@ def build(frame: pd.DataFrame) -> pd.DataFrame:
     # Is the 1-month move accelerating relative to the 3-month move?
     out["mom_accel"] = f["ret_21"] - f["ret_63"] / 3.0
 
-    return out[FEATURE_COLUMNS].replace([np.inf, -np.inf], np.nan)
+    return out[feature_columns(has_volume)].replace([np.inf, -np.inf], np.nan)
 
 
 def target(frame: pd.DataFrame, horizon: int) -> pd.Series:
@@ -87,14 +101,16 @@ def target(frame: pd.DataFrame, horizon: int) -> pd.Series:
     return (close.shift(-horizon) / close - 1.0).rename(f"fwd_ret_{horizon}")
 
 
-def build_dataset(frame: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+def build_dataset(
+    frame: pd.DataFrame, horizon: int, has_volume: bool = True
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Return (X, y_return, y_up) with unusable rows dropped.
 
     Rows are dropped when a feature is missing (warm-up) or the label is missing
     (the final ``horizon`` bars). The dropped tail is why predictions for the
     most recent bars come from the model rather than from the training set.
     """
-    X = build(frame)
+    X = build(frame, has_volume)
     y_ret = target(frame, horizon)
 
     usable = X.notna().all(axis=1) & y_ret.notna()
@@ -102,8 +118,8 @@ def build_dataset(frame: pd.DataFrame, horizon: int) -> tuple[pd.DataFrame, pd.S
     return X, y_ret, (y_ret > 0).astype(int).rename("up")
 
 
-def latest_features(frame: pd.DataFrame) -> pd.DataFrame | None:
+def latest_features(frame: pd.DataFrame, has_volume: bool = True) -> pd.DataFrame | None:
     """The most recent fully-populated feature row — what a live forecast uses."""
-    X = build(frame)
+    X = build(frame, has_volume)
     complete = X[X.notna().all(axis=1)]
     return complete.iloc[[-1]] if len(complete) else None

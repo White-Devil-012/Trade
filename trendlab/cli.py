@@ -7,6 +7,7 @@ import json
 import sys
 
 from .analysis import analyze, compare
+from .search import search as symbol_search
 from .config import AppConfig
 
 DISCLAIMER = (
@@ -84,10 +85,24 @@ def _print_screen(rows: list[dict]) -> None:
     print(f"\n  {DISCLAIMER}\n")
 
 
+def _print_search(hits: list) -> None:
+    if not hits:
+        print("\n  nothing matched. Try fewer words, or the ticker itself.\n")
+        return
+    header = f"{'SYMBOL':<16}{'KIND':<9}{'WHERE':<8}NAME"
+    print("\n" + header)
+    print("-" * max(len(header), 68))
+    for h in hits:
+        print(f"{h.symbol:<16}{h.kind:<9}{h.exchange:<8}{h.name[:44]}")
+    print("\n  Analyze one with:  python -m trendlab analyze <SYMBOL>\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="trendlab", description=__doc__)
-    parser.add_argument("--provider", default="yahoo", choices=["yahoo", "synthetic"],
-                        help="synthetic generates fake bars for offline demos")
+    parser.add_argument("--provider", default="auto",
+                        choices=["auto", "yahoo", "amfi", "synthetic"],
+                        help="auto routes MF:<code> to AMFI and everything else to Yahoo; "
+                             "synthetic generates fake bars for offline demos")
     parser.add_argument("--period", default=None, help="history window, e.g. 1y 2y 5y 10y")
     parser.add_argument("--json", action="store_true", help="emit raw JSON instead of a report")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -101,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_screen = sub.add_parser("screen", help="compare several symbols at a glance")
     p_screen.add_argument("symbols", nargs="+")
+
+    p_find = sub.add_parser("search", help="find a symbol or mutual fund by name")
+    p_find.add_argument("query", nargs="+")
+    p_find.add_argument("--no-funds", action="store_true", help="skip mutual funds")
 
     p_serve = sub.add_parser("serve", help="launch the web dashboard")
     p_serve.add_argument("--host", default="127.0.0.1")
@@ -120,7 +139,13 @@ def main(argv: list[str] | None = None) -> int:
         cfg = replace(cfg, model=replace(cfg.model, horizon_days=args.horizon))
 
     try:
-        if args.command == "analyze":
+        if args.command == "search":
+            hits = symbol_search(" ".join(args.query), include_funds=not args.no_funds)
+            if args.json:
+                print(json.dumps([h.to_dict() for h in hits], indent=2))
+            else:
+                _print_search(hits)
+        elif args.command == "analyze":
             report = analyze(args.symbol, args.period, args.provider, cfg,
                              include_forecast=not args.no_forecast)
             print(json.dumps(report, indent=2)) if args.json else _print_analysis(report)

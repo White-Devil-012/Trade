@@ -12,7 +12,7 @@ import pandas as pd
 
 from . import backtest, model, regime, signals
 from .config import AppConfig
-from .data import get_provider
+from .data import get_provider, resolve_provider_name
 from .indicators import enrich
 
 CHART_COLUMNS = [
@@ -36,10 +36,20 @@ def _series_payload(frame: pd.DataFrame, tail: int = 500) -> dict[str, Any]:
     return payload
 
 
+def _display_name(source, symbol: str) -> str:
+    """A human-readable name where the provider offers one."""
+    if getattr(source, "name", "") == "amfi":
+        try:
+            return source.meta(symbol).get("scheme_name") or symbol.upper()
+        except Exception:
+            return symbol.upper()
+    return symbol.upper()
+
+
 def analyze(
     symbol: str,
     period: str | None = None,
-    provider: str = "yahoo",
+    provider: str = "auto",
     config: AppConfig | None = None,
     include_forecast: bool = True,
     chart_bars: int = 500,
@@ -51,18 +61,29 @@ def analyze(
     why the forecast is absent rather than a fabricated one.
     """
     cfg = config or AppConfig()
-    source = get_provider(provider, **({"cache_dir": cfg.cache_dir} if provider == "yahoo" else {}))
+    provider_name = resolve_provider_name(symbol, provider)
+    kwargs = {"cache_dir": cfg.cache_dir} if provider_name in ("yahoo", "amfi") else {}
+    source = get_provider(provider_name, **kwargs)
 
     raw = source.history(symbol, period=period or cfg.default_period)
     frame = enrich(raw)
 
-    current_regime = regime.classify(frame)
+    # Read the asset class off the data, not the provider: a NAV series has no
+    # traded volume, so its volume-derived features and the
+    # accumulation/distribution label do not apply. Deriving it here means any
+    # provider that returns NAV-shaped bars is handled correctly.
+    has_volume = bool(raw["volume"].notna().any())
+
+    current_regime = regime.classify(frame, has_volume=has_volume)
     fired = signals.evaluate(frame)
 
     trend_result = backtest.run(frame, signals.composite_position(frame), cfg.backtest)
 
     report: dict[str, Any] = {
         "symbol": symbol.upper(),
+        "display_name": _display_name(source, symbol),
+        "asset_kind": "fund" if not has_volume else "equity",
+        "has_volume": has_volume,
         "provider": source.name,
         "period": period or cfg.default_period,
         "bars": int(len(frame)),
@@ -87,14 +108,14 @@ def analyze(
 
     if include_forecast:
         try:
-            report["forecast"] = model.forecast(frame, cfg.model).to_dict()
+            report["forecast"] = model.forecast(frame, cfg.model, has_volume).to_dict()
         except ValueError as exc:
             report["forecast_error"] = str(exc)
 
     return report
 
 
-def compare(symbols: list[str], period: str | None = None, provider: str = "yahoo",
+def compare(symbols: list[str], period: str | None = None, provider: str = "auto",
             config: AppConfig | None = None) -> list[dict[str, Any]]:
     """Lightweight screen across several symbols (no forecast — that is the slow part)."""
     rows = []

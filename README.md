@@ -3,8 +3,9 @@
 A local web app and CLI for analysing price trends, reading market conditions, and
 producing **probabilistic** forecasts with an honest track record attached.
 
-Works with anything Yahoo Finance covers — US tickers (`AAPL`), Indian ones
-(`RELIANCE.NS`, `TCS.NS`, `INFY.NS`), indices (`^NSEI`, `^GSPC`), FX and crypto.
+Built for the Indian market: NSE/BSE equities, Indian indices, and mutual fund NAVs
+from AMFI. Search by name — you don't need to know the ticker. Anything else Yahoo
+Finance covers (US tickers, FX, crypto) works too.
 
 ---
 
@@ -61,12 +62,14 @@ real market, and the app labels them as such.
 ## Use the CLI
 
 ```bash
+python -m trendlab search hdfc                          # find a symbol or fund
 python -m trendlab analyze RELIANCE.NS                  # full report
-python -m trendlab analyze AAPL --horizon 21            # 21-day forecast
-python -m trendlab analyze TSLA --no-forecast           # skip the slow part
-python -m trendlab screen AAPL MSFT NVDA INFY.NS        # compare several
+python -m trendlab analyze MF:118834                    # a mutual fund, by AMFI code
+python -m trendlab analyze ^NSEI --horizon 21           # 21-day forecast on NIFTY 50
+python -m trendlab analyze TCS.NS --no-forecast         # skip the slow part
+python -m trendlab screen RELIANCE.NS INFY.NS TCS.NS    # compare several
 python -m trendlab --provider synthetic analyze DEMO    # offline demo
-python -m trendlab analyze AAPL --json                  # machine-readable
+python -m trendlab analyze RELIANCE.NS --json           # machine-readable
 ```
 
 ## Use it as a library
@@ -80,6 +83,38 @@ print(report["forecast"]["evaluation"]["verdict"])
 ```
 
 ---
+
+## Where the data comes from
+
+| Asset | Source | Notes |
+|---|---|---|
+| NSE/BSE equities, indices | Yahoo Finance via `yfinance` | Unofficial. No API key, no SLA; rate-limits, and has broken before when Yahoo changed things. |
+| Indian mutual funds | AMFI (scheme list) + `api.mfapi.in` (NAV history) | AMFI is the official source but publishes only the current day; mfapi mirrors it with history. |
+| Offline demo & tests | Built-in synthetic generator | Random regime-switching bars. Describes no real market. |
+
+Symbol search works across all of them. A built-in index of the NIFTY 50 and the major
+Indian indices is matched locally, so searching "reliance" or "nifty" returns an answer
+even when Yahoo's unofficial search endpoint is down.
+
+```
+python -m trendlab search hdfc bank
+SYMBOL          KIND     WHERE   NAME
+HDFCBANK.NS     equity   NSE     HDFC Bank
+^NSEBANK        index    INDEX   NIFTY Bank
+MF:118834       fund     AMFI    HDFC Top 100 Fund - Growth
+```
+
+### Funds are not stocks
+
+A mutual fund prices once a day at a single NAV. There is no open, high, low or traded
+volume. Rather than fabricate an OHLC bar, every price column is set to the NAV and
+volume is left missing — and the pipeline drops the volume-derived features for that
+asset instead of training on nothing.
+
+This matters more than it sounds: leaving those features in makes every row incomplete
+and the training set comes back **empty**. `tests/test_funds.py` asserts both halves —
+that the volume feature set erases a fund's dataset, and that the price-only set does
+not.
 
 ## What it gives you
 
@@ -150,7 +185,7 @@ was discovered. `test_reports_no_edge_on_random_data` enforces that.
 
 ```bash
 pip install pytest httpx
-python -m pytest tests/ -q     # 57 tests
+python -m pytest tests/ -q     # 101 tests
 ```
 
 ## Layout
@@ -158,7 +193,8 @@ python -m pytest tests/ -q     # 57 tests
 ```
 trendlab/
   config.py         tunable defaults (costs, horizon, retrain cadence)
-  data/             providers: yahoo (cached) + synthetic (offline)
+  data/             providers: yahoo (cached), amfi (fund NAVs), synthetic (offline)
+  search.py         symbol + scheme search, with an offline Indian index
   indicators.py     SMA/EMA/RSI/MACD/Bollinger/ATR/ADX/Stochastic/OBV — all causal
   features.py       22-feature matrix + forward-return target
   regime.py         market-condition classification
@@ -168,7 +204,7 @@ trendlab/
   analysis.py       orchestration — one symbol in, one report out
   cli.py            command-line interface
   server/           FastAPI backend + dependency-free SVG dashboard
-tests/              57 tests, concentrated on lookahead and backtest integrity
+tests/              101 tests, concentrated on lookahead and backtest integrity
 ```
 
 The dashboard's charts are hand-rolled SVG with no CDN dependency, so the app works
@@ -195,6 +231,9 @@ theme is separately stepped rather than an automatic inversion.
 - **Long/flat by default.** Shorting exists in the backtester but is off, and it
   models no borrow cost.
 - **Single-asset.** No portfolio construction, position sizing or correlation.
+- **Fund NAVs lag.** AMFI publishes end-of-day; there is no intraday NAV to have.
+- **`api.mfapi.in` is a community mirror**, not an official AMFI endpoint. It is the
+  practical source for NAV history, but it is someone's free service.
 - **Yahoo Finance is unofficial** and rate-limits. Responses are cached for six hours.
 - **Costs are estimates.** The defaults (5bps commission + 5bps slippage per side)
   are deliberately pessimistic but will not match your broker.

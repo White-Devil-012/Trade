@@ -58,13 +58,31 @@ class YahooProvider:
 
         raw = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=True)
         if raw is None or len(raw) == 0:
+            # yfinance returns an empty frame for both a bad symbol and a
+            # blocked connection, so the message has to cover both.
             raise DataError(
-                f"Yahoo returned nothing for {symbol!r}. Check the symbol "
-                f"(Indian tickers need a .NS/.BO suffix, e.g. RELIANCE.NS)."
+                f"Yahoo returned no data for {symbol!r}. Either the symbol is wrong "
+                f"(Indian tickers need a .NS/.BO suffix, e.g. RELIANCE.NS) or the "
+                f"connection to Yahoo is blocked. Switch Source to 'Demo data' to "
+                f"check the app itself."
             )
         frame = normalize(raw, symbol)
         self._write_cache(path, frame)
         return frame
+
+
+def resolve_provider_name(symbol: str, provider: str = "auto") -> str:
+    """Pick a provider for a symbol.
+
+    ``MF:118834`` or a bare AMFI scheme code routes to AMFI; everything else
+    goes to Yahoo. Passing an explicit provider always wins.
+    """
+    if provider and provider != "auto":
+        return provider
+    token = str(symbol).strip().upper()
+    if token.startswith("MF:") or token.isdigit():
+        return "amfi"
+    return "yahoo"
 
 
 def get_provider(name: str = "yahoo", **kwargs):
@@ -77,8 +95,12 @@ def get_provider(name: str = "yahoo", **kwargs):
     key = (name or "yahoo").lower()
     if key == "yahoo":
         return YahooProvider(**kwargs)
+    if key == "amfi":
+        from .amfi import AmfiProvider
+
+        return AmfiProvider(**kwargs)
     if key == "synthetic":
         from .synthetic import SyntheticProvider
 
         return SyntheticProvider()
-    raise ValueError(f"unknown provider {name!r}; expected 'yahoo' or 'synthetic'")
+    raise ValueError(f"unknown provider {name!r}; expected 'yahoo', 'amfi' or 'synthetic'")

@@ -24,7 +24,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.inspection import permutation_importance
 
 from .config import ModelConfig
-from .features import FEATURE_COLUMNS, build_dataset, latest_features
+from .features import build_dataset, latest_features
 
 
 @dataclass
@@ -98,14 +98,14 @@ def _calibration_table(y_true: np.ndarray, probs: np.ndarray, bins: int = 5) -> 
 
 
 def walk_forward(
-    frame: pd.DataFrame, cfg: ModelConfig | None = None
+    frame: pd.DataFrame, cfg: ModelConfig | None = None, has_volume: bool = True
 ) -> tuple[pd.Series, pd.Series, Evaluation]:
     """Roll a model through history, predicting only forward.
 
     Returns (out-of-sample probabilities, realized labels, evaluation).
     """
     cfg = cfg or ModelConfig()
-    X, y_ret, y_up = build_dataset(frame, cfg.horizon_days)
+    X, y_ret, y_up = build_dataset(frame, cfg.horizon_days, has_volume)
 
     if len(X) < cfg.min_train_bars + cfg.retrain_every:
         raise ValueError(
@@ -249,23 +249,26 @@ def _importance(model, X_train: pd.DataFrame, y_train: pd.Series, cfg: ModelConf
         )
     except Exception:
         return []
+    names = list(X_train.columns)
     order = np.argsort(result.importances_mean)[::-1][:top]
     return [
-        {"feature": FEATURE_COLUMNS[i], "importance": round(float(result.importances_mean[i]), 4)}
+        {"feature": names[i], "importance": round(float(result.importances_mean[i]), 4)}
         for i in order if result.importances_mean[i] > 0
     ]
 
 
-def forecast(frame: pd.DataFrame, cfg: ModelConfig | None = None) -> Forecast:
+def forecast(
+    frame: pd.DataFrame, cfg: ModelConfig | None = None, has_volume: bool = True
+) -> Forecast:
     """Produce a live forecast for the latest bar, with its own report card."""
     cfg = cfg or ModelConfig()
-    probs, truth, evaluation = walk_forward(frame, cfg)
+    probs, truth, evaluation = walk_forward(frame, cfg, has_volume)
 
-    X, y_ret, y_up = build_dataset(frame, cfg.horizon_days)
+    X, y_ret, y_up = build_dataset(frame, cfg.horizon_days, has_volume)
     model = _make_model(cfg)
     model.fit(X, y_up)
 
-    live_row = latest_features(frame)
+    live_row = latest_features(frame, has_volume)
     if live_row is None:
         raise ValueError("not enough history to build a current feature row")
 
@@ -320,12 +323,13 @@ def forecast(frame: pd.DataFrame, cfg: ModelConfig | None = None) -> Forecast:
     )
 
 
-def model_position(frame: pd.DataFrame, cfg: ModelConfig | None = None, threshold: float = 0.55) -> pd.Series:
+def model_position(frame: pd.DataFrame, cfg: ModelConfig | None = None, threshold: float = 0.55,
+                   has_volume: bool = True) -> pd.Series:
     """Position series from walk-forward probabilities, for backtesting the model.
 
     Only out-of-sample probabilities are used, so this backtest reflects what the
     model would actually have signalled in real time.
     """
     cfg = cfg or ModelConfig()
-    probs, _, _ = walk_forward(frame, cfg)
+    probs, _, _ = walk_forward(frame, cfg, has_volume)
     return (probs >= threshold).astype(float).reindex(frame.index).fillna(0.0)

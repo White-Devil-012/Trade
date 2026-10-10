@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .analysis import analyze, compare
@@ -122,8 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     p_find.add_argument("--no-funds", action="store_true", help="skip mutual funds")
 
     p_serve = sub.add_parser("serve", help="launch the web dashboard")
-    p_serve.add_argument("--host", default="127.0.0.1")
-    p_serve.add_argument("--port", type=int, default=8000)
+    # A hosting platform tells you its port through $PORT; binding 0.0.0.0 is
+    # what makes the container reachable from outside itself.
+    p_serve.add_argument("--host", default=os.environ.get("TRENDLAB_HOST", "127.0.0.1"))
+    p_serve.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)))
 
     args = parser.parse_args(argv)
 

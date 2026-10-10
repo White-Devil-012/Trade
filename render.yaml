@@ -1,0 +1,15 @@
+# Render Blueprint: New > Blueprint > pick this repo, and Render builds the
+# Dockerfile and deploys it. Free plan sleeps after ~15 idle minutes.
+services:
+  - type: web
+    name: trendlab
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Set this in the Render dashboard. Leaving it unset makes the app public.
+      - key: TRENDLAB_PASSWORD
+        sync: false
+      - key: TRENDLAB_USER
+        value: trendlab

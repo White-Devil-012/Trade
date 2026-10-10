@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import os
+import secrets
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..analysis import analyze, compare
@@ -21,6 +24,44 @@ app = FastAPI(
     description="Technical analysis, market-regime detection and probabilistic forecasting.",
     version="0.1.0",
 )
+
+
+def _credentials_ok(header: str, user: str, password: str) -> bool:
+    """Check an HTTP Basic header in constant time."""
+    if not header.startswith("Basic "):
+        return False
+    try:
+        given_user, _, given_pw = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+    except Exception:
+        return False
+    # compare_digest on bytes: a str compare would raise on non-ASCII input.
+    return secrets.compare_digest(given_user.encode(), user.encode()) & secrets.compare_digest(
+        given_pw.encode(), password.encode()
+    )
+
+
+@app.middleware("http")
+async def optional_basic_auth(request: Request, call_next):
+    """Password-protect the whole app when TRENDLAB_PASSWORD is set.
+
+    Off by default so local use stays frictionless. Worth turning on for any
+    public deployment: every forecast costs seconds of CPU and a share of the
+    Yahoo rate limit, and an open URL lets anyone spend both.
+
+    The health check stays open so the hosting platform can still probe it.
+    """
+    password = os.environ.get("TRENDLAB_PASSWORD")
+    if not password or request.url.path == "/api/health":
+        return await call_next(request)
+
+    user = os.environ.get("TRENDLAB_USER", "trendlab")
+    if _credentials_ok(request.headers.get("authorization", ""), user, password):
+        return await call_next(request)
+    return Response(
+        status_code=401,
+        content="Authentication required.",
+        headers={"WWW-Authenticate": 'Basic realm="TrendLab", charset="UTF-8"'},
+    )
 
 
 @app.get("/api/health")

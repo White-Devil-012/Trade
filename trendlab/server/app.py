@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..analysis import analyze, compare
+from ..search import search as symbol_search
 from ..config import AppConfig
 from ..data.base import DataError
 
@@ -31,7 +32,7 @@ def health() -> dict[str, str]:
 def api_analyze(
     symbol: str = Query(..., min_length=1, max_length=24),
     period: str = Query("5y", pattern=r"^(1y|2y|3y|5y|10y|max)$"),
-    provider: str = Query("yahoo", pattern=r"^(yahoo|synthetic)$"),
+    provider: str = Query("auto", pattern=r"^(auto|yahoo|amfi|synthetic)$"),
     horizon: int = Query(5, ge=1, le=60),
     forecast: bool = Query(True),
 ) -> dict[str, Any]:
@@ -52,7 +53,7 @@ def api_analyze(
             detail=(
                 f"could not reach the market data provider: {str(exc).rstrip('.')}. Check your "
                 f"network (a proxy or firewall may block finance.yahoo.com), or switch Source "
-                f"to 'Synthetic (demo)' to explore the app offline."
+                f"to 'Demo data' to explore the app offline."
             ),
         ) from exc
     except Exception as exc:
@@ -63,13 +64,31 @@ def api_analyze(
 def api_screen(
     symbols: str = Query(..., description="comma-separated symbols"),
     period: str = Query("2y", pattern=r"^(1y|2y|3y|5y|10y|max)$"),
-    provider: str = Query("yahoo", pattern=r"^(yahoo|synthetic)$"),
+    provider: str = Query("auto", pattern=r"^(auto|yahoo|amfi|synthetic)$"),
 ) -> dict[str, Any]:
     """Quick multi-symbol screen. Capped so one request cannot stall the server."""
     tickers = [s.strip() for s in symbols.split(",") if s.strip()][:12]
     if not tickers:
         raise HTTPException(status_code=400, detail="no symbols supplied")
     return {"rows": compare(tickers, period, provider, AppConfig())}
+
+
+@app.get("/api/search")
+def api_search(
+    q: str = Query(..., min_length=2, max_length=64),
+    limit: int = Query(15, ge=1, le=40),
+    funds: bool = Query(True),
+) -> dict[str, Any]:
+    """Find a symbol or mutual fund scheme by name or ticker.
+
+    Always returns something for a common Indian name even when the upstream
+    search endpoints are unreachable -- the builtin index is matched locally.
+    """
+    try:
+        hits = symbol_search(q.strip(), limit=limit, include_funds=funds)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"search failed: {exc}") from exc
+    return {"query": q.strip(), "results": [h.to_dict() for h in hits]}
 
 
 @app.get("/")

@@ -14,9 +14,12 @@
       <h1>TrendLab</h1>
       <p>Trend analysis, market-regime detection and probabilistic forecasting</p>
     </div>
-    <div class="field">
-      <label for="symbol">Symbol</label>
-      <input id="symbol" value="AAPL" placeholder="AAPL / RELIANCE.NS" autocomplete="off" />
+    <div class="field search-field">
+      <label for="symbol">Symbol or fund</label>
+      <input id="symbol" value="RELIANCE.NS" placeholder="Reliance, HDFC, NIFTY…"
+             autocomplete="off" role="combobox" aria-expanded="false"
+             aria-controls="suggest" aria-autocomplete="list" />
+      <ul id="suggest" class="suggest" role="listbox" hidden></ul>
     </div>
     <div class="field">
       <label for="period">History</label>
@@ -39,12 +42,14 @@
     <div class="field">
       <label for="provider">Source</label>
       <select id="provider">
-        <option value="yahoo" selected>Yahoo (live)</option>
-        <option value="synthetic">Synthetic (demo)</option>
+        <option value="auto" selected>Live data</option>
+        <option value="synthetic">Demo data</option>
       </select>
     </div>
-    <button id="run">Analyze</button>
-    <button id="theme" class="ghost" title="Toggle light / dark">◐</button>
+    <div class="actions">
+      <button id="run">Analyze</button>
+      <button id="theme" class="ghost" title="Toggle light / dark">◐</button>
+    </div>
   </div>
 </header>
 

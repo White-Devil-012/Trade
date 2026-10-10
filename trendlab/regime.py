@@ -110,7 +110,7 @@ def annotate(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def classify(frame: pd.DataFrame, at: int = -1) -> Regime:
+def classify(frame: pd.DataFrame, at: int = -1, has_volume: bool = True) -> Regime:
     """Classify the market condition at one bar (default: the latest)."""
     annotated = frame if "vol_pctile" in frame.columns else annotate(frame)
     row = annotated.iloc[at]
@@ -118,7 +118,9 @@ def classify(frame: pd.DataFrame, at: int = -1) -> Regime:
     trend = _trend_label(row)
     volatility = _vol_label(row.get("vol_pctile", np.nan))
     momentum = _momentum_label(row.get("rsi_14", np.nan))
-    participation = _participation_label(row)
+    # A fund has no traded volume, so "accumulation vs distribution" has no
+    # meaning for it -- say so rather than reporting a label built from NaN.
+    participation = _participation_label(row) if has_volume else "not_applicable"
     drawdown_state = _drawdown_label(row.get("drawdown", np.nan))
 
     readable_trend = trend.replace("_", " ")

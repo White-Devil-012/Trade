@@ -1,5 +1,6 @@
 """Tunable defaults. Everything here is a starting point, not a recommendation."""
 
+import os
 from dataclasses import dataclass, field
 
 
@@ -30,9 +31,18 @@ class ModelConfig:
     min_edge_over_baseline: float = 0.02
 
 
+def _default_cache_dir() -> str:
+    """Where fetched price data is cached.
+
+    Overridable because a container's working directory is usually ephemeral
+    or read-only; the cache belongs on a mounted volume instead.
+    """
+    return os.environ.get("TRENDLAB_CACHE_DIR", ".cache/trendlab")
+
+
 @dataclass(frozen=True)
 class AppConfig:
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
-    cache_dir: str = ".cache/trendlab"
+    cache_dir: str = field(default_factory=_default_cache_dir)
     default_period: str = "5y"

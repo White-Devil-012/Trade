@@ -59,6 +59,62 @@ No network? Switch **Source** to *Synthetic (demo)* — it generates random
 regime-switching bars so you can explore every panel offline. Those bars describe no
 real market, and the app labels them as such.
 
+## Hosting it
+
+Everything ships in one container. `/api/health` is the health check, `$PORT` is
+honoured, and price data is cached on a `/data` volume.
+
+### On your own machine
+
+```bash
+docker compose up --build        # http://localhost:8000
+```
+
+### On the internet
+
+| Option | Cost | Good for | Catch |
+|---|---|---|---|
+| **Render** | Free tier | Easiest: `render.yaml` is included | Sleeps after ~15 idle min; first visit then takes ~1 min |
+| **Hugging Face Spaces** (Docker) | Free | Generous CPU and RAM for an ML demo | Public by default; set `app_port: 8000` in the Space's README |
+| **Railway / Fly.io** | ~$5/mo | Always on, no cold starts | Needs a card |
+| **Any VPS** | ~$5/mo | Full control | You patch and secure it yourself |
+
+**Render, step by step:** push to GitHub, then on render.com choose *New → Blueprint*,
+pick this repo, and set `TRENDLAB_PASSWORD` when prompted. Render rebuilds on every push
+to `main`.
+
+**Not suitable:** Vercel, Netlify and GitHub Pages. They run serverless functions or
+static files; a forecast needs ~10 seconds of CPU and a disk cache.
+
+### Lock it down before it is public
+
+Every forecast costs about 10 seconds of CPU and a share of Yahoo's rate limit, and
+there are no user accounts. Set a password and the whole app sits behind HTTP Basic
+Auth:
+
+```bash
+docker run -p 8000:8000 -e TRENDLAB_PASSWORD='choose-one' trendlab
+# username defaults to "trendlab"; change it with TRENDLAB_USER
+```
+
+`/api/health` stays open so the platform's probes keep working.
+
+### The biggest risk: Yahoo and cloud IPs
+
+Yahoo throttles datacenter IP ranges far harder than home connections. The same
+`RELIANCE.NS` request that works on your laptop can return `429 Too Many Requests`, or
+nothing at all, from a cloud host. The six-hour disk cache absorbs repeat requests,
+but a busy instance on a shared IP may still be refused. Test a few symbols right
+after deploying. If Yahoo refuses the host, the dependable fix is a keyed data
+provider. Mutual funds are unaffected; AMFI and mfapi do not throttle this way.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `8000` | Port to listen on; hosting platforms set it |
+| `TRENDLAB_PASSWORD` | unset (open) | Turns on HTTP Basic Auth |
+| `TRENDLAB_USER` | `trendlab` | Basic Auth username |
+| `TRENDLAB_CACHE_DIR` | `.cache/trendlab` | Where fetched prices are cached |
+
 ## Use the CLI
 
 ```bash
@@ -185,7 +241,7 @@ was discovered. `test_reports_no_edge_on_random_data` enforces that.
 
 ```bash
 pip install pytest httpx
-python -m pytest tests/ -q     # 101 tests
+python -m pytest tests/ -q     # 114 tests
 ```
 
 ## Layout
@@ -204,7 +260,7 @@ trendlab/
   analysis.py       orchestration — one symbol in, one report out
   cli.py            command-line interface
   server/           FastAPI backend + dependency-free SVG dashboard
-tests/              101 tests, concentrated on lookahead and backtest integrity
+tests/              114 tests, concentrated on lookahead and backtest integrity
 ```
 
 The dashboard's charts are hand-rolled SVG with no CDN dependency, so the app works

@@ -1,0 +1,14 @@
+services:
+  trendlab:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Survives restarts, so a redeploy does not re-fetch every symbol.
+      - trendlab-cache:/data
+    environment:
+      TRENDLAB_CACHE_DIR: /data/cache
+    restart: unless-stopped
+
+volumes:
+  trendlab-cache:

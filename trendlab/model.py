@@ -32,6 +32,7 @@ class Evaluation:
     """Out-of-sample scorecard. ``edge`` is the number that matters."""
 
     n_predictions: int
+    up_rate: float             # share of outcomes that were "up"
     accuracy: float
     baseline_accuracy: float   # always predicting the majority class
     edge: float                # accuracy - baseline_accuracy
@@ -189,6 +190,7 @@ def _evaluate(truth: np.ndarray, probs: np.ndarray, cfg: ModelConfig) -> Evaluat
 
     return Evaluation(
         n_predictions=int(len(truth)),
+        up_rate=round(base_rate, 4),
         accuracy=round(accuracy, 4),
         baseline_accuracy=round(baseline_accuracy, 4),
         edge=round(edge, 4),

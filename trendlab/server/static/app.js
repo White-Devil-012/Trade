@@ -1,80 +1,562 @@
-import { lineChart, barChart, rangeBar, legend, fmtNum, fmtPct, fmtSignedPct } from './charts.js';
+import { priceChart, sparkline, fmtINR, fmtIN, fmtDate } from './charts.js';
+import { renderAdvanced } from './advanced.js';
 
-const S = { 1: 'var(--series-1)', 2: 'var(--series-2)', 3: 'var(--series-3)', 4: 'var(--series-4)' };
 const $ = (id) => document.getElementById(id);
+const view = $('view');
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const enc = encodeURIComponent;
+
+/* Storage can be missing or throw (private windows, blocked site data). */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+};
 
 /* ---------------- theme ---------------- */
-const savedTheme = (() => {
-  try { return localStorage.getItem('trendlab-theme'); } catch { return null; }
-})();
+const savedTheme = store.get('trendlab-theme');
 if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
-
 $('theme').addEventListener('click', () => {
   const current = document.documentElement.getAttribute('data-theme');
-  const isDark = current
-    ? current === 'dark'
-    : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const isDark = current ? current === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   const next = isDark ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
-  try { localStorage.setItem('trendlab-theme', next); } catch { /* private mode */ }
-  if (lastReport) render(lastReport); // SVG strokes resolve tokens at paint time
+  store.set('trendlab-theme', next);
 });
 
-/* ---------------- symbol search ---------------- */
-const escHtml = (t) => String(t).replace(/[&<>"']/g, (c) =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+/* ---------------- demo mode ---------------- */
+let demo = store.get('trendlab-demo') === '1';
+const provider = () => (demo ? 'synthetic' : 'auto');
 
+function syncDemoUI() {
+  $('demo-banner').hidden = !demo;
+  $('demo-toggle').checked = demo;
+}
+function setDemo(on) {
+  demo = on;
+  store.set('trendlab-demo', on ? '1' : '0');
+  names.clear();
+  syncDemoUI();
+  route();
+}
+$('demo-toggle').addEventListener('change', (e) => setDemo(e.target.checked));
+$('demo-off').addEventListener('click', () => setDemo(false));
+
+/* ---------------- api ---------------- */
+async function api(path, params = {}) {
+  const res = await fetch(`${path}?${new URLSearchParams({ ...params, provider: provider() })}`);
+  let body = {};
+  try { body = await res.json(); } catch { /* non-JSON error page */ }
+  if (!res.ok) {
+    const err = new Error(body.detail || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+/* Names seen on the home screen or in search, so a stock page can show the
+   company name immediately instead of a ticker while it loads. */
+const names = new Map();
+
+/* ---------------- formatting ---------------- */
+const money = (v, kind) => (kind === 'index' ? fmtIN(v) : fmtINR(v));
+
+function direction(v) { return v > 0 ? 'up' : v < 0 ? 'down' : 'flat'; }
+
+/** ▲ +12.30 (0.89%) — arrow and sign carry direction, colour only repeats it. */
+function changeHtml(change, pct, suffix = '') {
+  const dir = direction(change);
+  const arrow = { up: '▲', down: '▼', flat: '●' }[dir];
+  const sign = { up: '+', down: '−', flat: '' }[dir];
+  const spoken = { up: 'up', down: 'down', flat: 'unchanged' }[dir];
+  return `<span class="chg ${dir}"><span aria-hidden="true">${arrow}</span>`
+    + `<span class="sr-only">${spoken}</span> ${sign}${fmtIN(Math.abs(change ?? 0))} `
+    + `(${(Math.abs(pct ?? 0) * 100).toFixed(2)}%)${suffix}</span>`;
+}
+
+function pctHtml(v) {
+  if (v === null || v === undefined) return '<span class="muted">—</span>';
+  const dir = direction(v);
+  const sign = { up: '+', down: '−', flat: '' }[dir];
+  return `<span class="chg ${dir}">${sign}${(Math.abs(v) * 100).toFixed(2)}%</span>`;
+}
+
+const STOP = new Set(['limited', 'ltd', 'the', 'of', 'and', '&']);
+function initials(name) {
+  const words = String(name).replace(/[^A-Za-z0-9& ]/g, ' ').split(/\s+/).filter(Boolean);
+  const pick = words.filter((w) => !STOP.has(w.toLowerCase()));
+  const use = pick.length ? pick : words;
+  if (use.length >= 2) return (use[0][0] + use[1][0]).toUpperCase();
+  return (use[0] || '?').slice(0, 2).toUpperCase();
+}
+
+/* Colour follows the company, never its position on screen. */
+function avatarHtml(symbol, name, size = '') {
+  let h = 0;
+  for (const c of String(symbol)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return `<span class="avatar ${size}" style="--av: var(--series-${(h % 8) + 1})" aria-hidden="true">${esc(initials(name))}</span>`;
+}
+
+const skeletons = (n, cls = 'skeleton') => Array.from({ length: n }, () => `<div class="${cls}"></div>`).join('');
+
+/* Translate server errors into something a non-developer can act on. */
+function friendly(err) {
+  if (err.status === 502) {
+    return "We couldn't reach the price feed. Your internet connection, or a firewall, may be blocking it.";
+  }
+  if (err.status === 404) return "We couldn't find prices for this. Try searching for it by name.";
+  return 'Something went wrong while loading this.';
+}
+
+function errorHtml(title, err, back = '') {
+  return `<div class="error-card">
+    <h2>${esc(title)}</h2>
+    <p>${esc(friendly(err))}</p>
+    <div>
+      <button class="btn" type="button" data-action="retry">Try again</button>
+      ${demo ? '' : '<button class="btn secondary" type="button" data-action="demo">Use demo data instead</button>'}
+      ${back}
+    </div>
+    <details class="small muted" style="margin-top:12px"><summary>Technical details</summary>${esc(err.message)}</details>
+  </div>`;
+}
+
+view.addEventListener('click', (e) => {
+  const action = e.target.closest('[data-action]')?.dataset.action;
+  if (action === 'retry') route();
+  if (action === 'demo') setDemo(true);
+});
+
+/* ---------------- router ---------------- */
+let navToken = 0;
+
+function route() {
+  closeSuggest();
+  const nav = ++navToken;
+  const hash = location.hash || '#/';
+  window.scrollTo(0, 0);
+  if (hash.startsWith('#/s/')) return renderStock(decodeURIComponent(hash.slice(4)), nav);
+  if (hash === '#/funds') return renderFunds(nav);
+  return renderHome(nav);
+}
+window.addEventListener('hashchange', route);
+
+const tabsHtml = (active) => `<nav class="tabs" aria-label="Browse">
+  <a class="tab" href="#/" ${active === 'stocks' ? 'aria-current="page"' : ''}>Stocks</a>
+  <a class="tab" href="#/funds" ${active === 'funds' ? 'aria-current="page"' : ''}>Mutual funds</a>
+</nav>`;
+
+/* ---------------- home ---------------- */
+function indexCard(t) {
+  return `<a class="index-card" href="#/s/${enc(t.symbol)}">
+    <div class="name">${esc(t.name)}</div>
+    <div class="value">${fmtIN(t.price)}</div>
+    ${changeHtml(t.change, t.change_pct)}
+  </a>`;
+}
+
+function stockCard(t) {
+  return `<a class="stock-card" href="#/s/${enc(t.symbol)}">
+    ${avatarHtml(t.symbol, t.name)}
+    <div class="name">${esc(t.name)}</div>
+    <div class="quote"><span class="price">${fmtINR(t.price)}</span>${changeHtml(t.change, t.change_pct)}</div>
+    <div class="spark" data-spark="${t.spark.join(',')}"
+         data-up="${t.spark[t.spark.length - 1] >= t.spark[0]}"></div>
+  </a>`;
+}
+
+function fillSparks(root) {
+  root.querySelectorAll('[data-spark]').forEach((node) => {
+    sparkline(node, node.dataset.spark.split(',').map(Number), node.dataset.up === 'true');
+  });
+}
+
+async function renderHome(nav) {
+  document.title = 'TrendLab';
+  view.innerHTML = `${tabsHtml('stocks')}
+    <section class="section"><h2 class="section-title">Indices</h2><div class="index-row">${skeletons(3)}</div></section>
+    <section class="section"><h2 class="section-title">Top movers today</h2><div class="stock-grid">${skeletons(4)}</div></section>
+    <section class="section"><h2 class="section-title">Popular stocks</h2><div class="stock-grid">${skeletons(8)}</div></section>`;
+
+  let data;
+  try {
+    data = await api('/api/market');
+  } catch (err) {
+    if (nav !== navToken) return;
+    view.innerHTML = tabsHtml('stocks') + errorHtml("Couldn't load market prices", err);
+    return;
+  }
+  if (nav !== navToken) return;
+
+  for (const t of [...data.indices, ...data.stocks]) names.set(t.symbol, t.name);
+  const gainers = data.stocks.filter((s) => s.change_pct > 0).sort((a, b) => b.change_pct - a.change_pct).slice(0, 4);
+  const losers = data.stocks.filter((s) => s.change_pct < 0).sort((a, b) => a.change_pct - b.change_pct).slice(0, 4);
+  const asOf = data.stocks[0]?.as_of || data.indices[0]?.as_of;
+
+  view.innerHTML = `${tabsHtml('stocks')}
+    <section class="section">
+      <h2 class="section-title">Indices</h2>
+      <div class="index-row">${data.indices.map(indexCard).join('')}</div>
+    </section>
+    <section class="section">
+      <div class="section-head">
+        <h2>Top movers today</h2>
+        <div class="seg" role="group" aria-label="Show gainers or losers">
+          <button type="button" data-mov="gainers" aria-pressed="true">Gainers</button>
+          <button type="button" data-mov="losers" aria-pressed="false">Losers</button>
+        </div>
+      </div>
+      <div class="stock-grid" id="movers"></div>
+    </section>
+    <section class="section">
+      <h2 class="section-title">Popular stocks</h2>
+      <div class="stock-grid">${data.stocks.map(stockCard).join('')}</div>
+    </section>
+    <p class="small muted">${asOf ? `Prices as of ${fmtDate(asOf)}. ` : ''}The line on each card shows the past month.
+    Top movers are picked from the popular stocks above.
+    ${data.missing.length ? `Couldn't load: ${data.missing.map(esc).join(', ')}.` : ''}</p>`;
+
+  const showMovers = (which) => {
+    const list = which === 'gainers' ? gainers : losers;
+    const box = $('movers');
+    box.innerHTML = list.length ? list.map(stockCard).join('')
+      : `<div class="empty">None of these stocks ${which === 'gainers' ? 'rose' : 'fell'} on the last trading day.</div>`;
+    fillSparks(box);
+    view.querySelectorAll('[data-mov]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mov === which)));
+  };
+  view.querySelectorAll('[data-mov]').forEach((b) => b.addEventListener('click', () => showMovers(b.dataset.mov)));
+  showMovers('gainers');
+  fillSparks(view);
+}
+
+/* ---------------- mutual funds ---------------- */
+const FUND_CHIPS = [
+  ['Index funds', 'index'], ['Flexi cap', 'flexi cap'], ['Large cap', 'large cap'],
+  ['Mid cap', 'mid cap'], ['Small cap', 'small cap'], ['ELSS · tax saving', 'elss'], ['Liquid', 'liquid'],
+];
+
+function renderFunds(nav) {
+  document.title = 'Mutual funds · TrendLab';
+  view.innerHTML = `${tabsHtml('funds')}
+    <section class="section">
+      <h2 class="section-title">Find a mutual fund</h2>
+      <div class="fund-search">
+        <input id="fund-q" type="search" autocomplete="off"
+               placeholder="Search by fund name, e.g. “flexi cap” or a fund house"
+               aria-label="Search mutual funds" />
+      </div>
+      <div class="chips" role="group" aria-label="Fund categories">
+        ${FUND_CHIPS.map(([label, q]) => `<button class="chip" type="button" data-q="${esc(q)}" aria-pressed="false">${esc(label)}</button>`).join('')}
+      </div>
+      <ul class="fund-results" id="fund-results"></ul>
+      <p class="small muted" id="fund-note">${demo
+        ? 'Demo mode lists a few made-up funds so you can try the screens offline.'
+        : 'Covers every scheme listed with AMFI. A fund’s price is its NAV, published once a day after markets close.'}</p>
+    </section>`;
+
+  const input = $('fund-q');
+  const results = $('fund-results');
+  let timer = null;
+
+  const run = async (q) => {
+    view.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.q === q)));
+    if (q.trim().length < 2) { results.innerHTML = ''; return; }
+    results.innerHTML = '<li class="loading-line"><span class="spinner"></span>Searching…</li>';
+    try {
+      const body = await api('/api/search', { q, kind: 'fund', limit: 25 });
+      if (nav !== navToken) return;
+      for (const r of body.results) names.set(r.symbol, r.name);
+      results.innerHTML = body.results.length
+        ? body.results.map((r) => `<li><a href="#/s/${enc(r.symbol)}">
+            ${avatarHtml(r.symbol, r.name)}
+            <span><span class="f-name">${esc(r.name)}</span><br>
+            <span class="f-meta">Mutual fund · scheme code ${esc(r.symbol.replace('MF:', ''))}</span></span>
+          </a></li>`).join('')
+        : `<li class="empty">No funds matched “${esc(q)}”. Try fewer words.</li>`;
+    } catch (err) {
+      if (nav !== navToken) return;
+      results.innerHTML = `<li>${errorHtml("Couldn't search funds", err)}</li>`;
+    }
+  };
+
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => run(input.value), 250);
+  });
+  view.querySelectorAll('.chip').forEach((chip) => chip.addEventListener('click', () => {
+    input.value = chip.dataset.q;
+    run(chip.dataset.q);
+  }));
+}
+
+/* ---------------- stock / fund page ---------------- */
+const RANGES = [
+  ['1W', { days: 7 }], ['1M', { months: 1 }], ['3M', { months: 3 }], ['6M', { months: 6 }],
+  ['1Y', { years: 1 }], ['3Y', { years: 3 }], ['5Y', { years: 5 }],
+];
+const SLACK_DAYS = 7; // "5 years ago" is often a weekend or holiday
+
+function rangeStart(dates, spec) {
+  const end = new Date(`${dates[dates.length - 1]}T00:00:00`);
+  const target = new Date(end);
+  if (spec.days) target.setDate(target.getDate() - spec.days);
+  if (spec.months) target.setMonth(target.getMonth() - spec.months);
+  if (spec.years) target.setFullYear(target.getFullYear() - spec.years);
+  const first = new Date(`${dates[0]}T00:00:00`);
+  if (first - target > SLACK_DAYS * 864e5) return -1; // not enough history
+  const iso = target.toISOString().slice(0, 10);
+  let idx = 0;
+  for (let i = 0; i < dates.length && dates[i] <= iso; i++) idx = i;
+  return idx;
+}
+
+function rangeBarHtml(label, low, high, value, kind) {
+  if (low == null || high == null || value == null) return '';
+  const pos = high > low ? Math.min(100, Math.max(0, ((value - low) / (high - low)) * 100)) : 50;
+  return `<div class="range-bar">
+    <div class="ends"><span>Low<b>${money(low, kind)}</b></span><span style="text-align:right">High<b>${money(high, kind)}</b></span></div>
+    <div class="track"><span class="marker" style="left:${pos.toFixed(1)}%" title="Current ${money(value, kind)}"></span></div>
+    <div class="cap">${esc(label)}</div>
+  </div>`;
+}
+
+function statHtml(label, value) {
+  return `<div class="stat"><div class="lbl">${esc(label)}</div><div class="val">${value}</div></div>`;
+}
+
+function keyNumbersHtml(s) {
+  const q = s.quote;
+  if (s.kind === 'fund') {
+    return rangeBarHtml('52-week range', q.low_52w, q.high_52w, q.price, s.kind)
+      + `<div class="stats-grid">
+        ${statHtml('NAV', fmtINR(q.price))}
+        ${statHtml('NAV date', esc(fmtDate(q.as_of)))}
+        ${statHtml('Previous NAV', fmtINR(q.prev_close))}
+      </div>`;
+  }
+  return rangeBarHtml("Today's range", q.day_low, q.day_high, q.price, s.kind)
+    + rangeBarHtml('52-week range', q.low_52w, q.high_52w, q.price, s.kind)
+    + `<div class="stats-grid">
+      ${statHtml('Open', money(q.open, s.kind))}
+      ${statHtml('Previous close', money(q.prev_close, s.kind))}
+      ${q.volume != null ? statHtml('Volume', fmtIN(q.volume, 0)) : ''}
+    </div>`;
+}
+
+function returnsHtml(returns) {
+  return `<div class="returns-grid">${RANGES.map(([label]) => {
+    const r = returns[label];
+    return `<div class="ret"><div class="lbl">${label}${r?.annualised ? ' <span class="pa">p.a.</span>' : ''}</div>
+      <div class="val">${pctHtml(r ? r.value : null)}</div></div>`;
+  }).join('')}</div>
+  <p class="small muted" style="margin:10px 0 0">3Y and 5Y are yearly averages (p.a.), the way funds quote returns.</p>`;
+}
+
+function moodHtml(m) {
+  const arrow = { up: '▲', down: '▼', flat: '●' }[m.tone] || '●';
+  return `<span class="pill ${m.tone === 'up' ? 'up' : m.tone === 'down' ? 'down' : 'flat'}">
+      <span aria-hidden="true">${arrow}</span> ${esc(m.headline)}</span>
+    <p>${m.sentences.map(esc).join(' ')}</p>`;
+}
+
+function predictionHtml(p) {
+  const tone = p.lean === 'up' ? 'up' : p.lean === 'down' ? 'down' : 'flat';
+  const arrow = { up: '▲', down: '▼', flat: '●' }[tone];
+  const prob = p.probability_up != null
+    ? `<div class="take-prob"><span class="big ${p.reliable ? '' : 'muted'}">${Math.round(p.probability_up * 100)}%</span>
+       <span class="lbl">chance it’s higher in ${p.horizon_days} trading days</span></div>` : '';
+  return `<span class="pill ${tone}"><span aria-hidden="true">${arrow}</span> ${esc(p.headline)}</span>
+    ${prob}
+    <p>${p.sentences.map(esc).join(' ')}</p>`;
+}
+
+async function renderStock(symbol, nav) {
+  const backHref = symbol.toUpperCase().startsWith('MF:') ? '#/funds' : '#/';
+  const back = `<a class="back" href="${backHref}">← Back</a>`;
+  const knownName = names.get(symbol);
+  document.title = `${knownName || symbol} · TrendLab`;
+
+  view.innerHTML = `${back}
+    <div class="stock-layout"><div class="stock-main">
+      <div class="stock-head">${avatarHtml(symbol, knownName || symbol, 'lg')}
+        <div><h1>${esc(knownName || symbol)}</h1><p class="meta">Loading…</p></div></div>
+      <div class="skeleton" style="min-height:340px"></div>
+    </div><aside class="stock-side"><div class="skeleton" style="min-height:260px"></div></aside></div>`;
+
+  let s;
+  try {
+    s = await api('/api/stock', { symbol });
+  } catch (err) {
+    if (nav !== navToken) return;
+    view.innerHTML = back + errorHtml(`Couldn't load ${knownName || symbol}`, err);
+    return;
+  }
+  if (nav !== navToken) return;
+
+  names.set(symbol, s.name);
+  document.title = `${s.name} · TrendLab`;
+  const ticker = s.kind === 'equity' ? s.symbol.split('.')[0] : s.kind === 'fund' ? `Scheme ${s.symbol.replace('MF:', '')}` : '';
+  const q = s.quote;
+  const priceLabel = s.kind === 'fund' ? 'NAV as of ' : 'As of ';
+
+  view.innerHTML = `${back}
+    <div class="stock-layout">
+      <div class="stock-main">
+        <div class="o1">
+          <div class="stock-head">${avatarHtml(s.symbol, s.name, 'lg')}
+            <div><h1>${esc(s.name)}</h1><p class="meta">${esc([s.exchange, ticker].filter(Boolean).join(' · '))}</p></div>
+          </div>
+          <div class="price-row">
+            <span class="price-big">${money(q.price, s.kind)}</span>
+            ${changeHtml(q.change, q.change_pct, ' <span class="muted">1D</span>')}
+            <span class="asof">${priceLabel}${esc(fmtDate(q.as_of))}</span>
+          </div>
+        </div>
+
+        <div class="card chart-card o2">
+          <div class="chart" id="price-chart"></div>
+          <div class="range-row">
+            <div class="ranges" role="group" aria-label="Chart range">
+              ${RANGES.map(([label]) => `<button type="button" data-range="${label}" aria-pressed="false">${label}</button>`).join('')}
+            </div>
+            <span class="range-change" id="range-change" aria-live="polite"></span>
+          </div>
+        </div>
+
+        <section class="card o4"><h2>Returns</h2>${returnsHtml(s.returns)}</section>
+        <section class="card o5"><h2>${s.kind === 'fund' ? 'Fund details' : 'Key numbers'}</h2>${keyNumbersHtml(s)}</section>
+
+        <details class="advanced o6" id="advanced">
+          <summary><span><b>Advanced analysis</b><span>Indicators, signals, a strategy backtest and the model’s track record</span></span></summary>
+          <div class="advanced-body" id="advanced-body"><div class="loading-line"><span class="spinner"></span>Running the analysis…</div></div>
+        </details>
+      </div>
+
+      <aside class="stock-side">
+        <section class="card take" id="take">
+          <h2>Our take</h2>
+          <div class="take-block"><h3>Right now</h3>${moodHtml(s.mood)}</div>
+          <div class="take-block" id="take-forecast"><h3>Next 5 trading days</h3>
+            <div class="loading-line"><span class="spinner"></span>Testing the forecast against past prices…</div></div>
+          <p class="fine">This describes what the numbers show. It is not advice to buy or sell.</p>
+        </section>
+      </aside>
+    </div>`;
+
+  // Chart with range buttons.
+  const dates = s.history.dates;
+  const close = s.history.close;
+  const drawRange = (label) => {
+    const spec = RANGES.find(([l]) => l === label)[1];
+    const start = rangeStart(dates, spec);
+    if (start < 0) return;
+    const d = dates.slice(start), v = close.slice(start);
+    const change = v[v.length - 1] / v[0] - 1;
+    priceChart($('price-chart'), { dates: d, values: v, up: change >= 0, format: (x) => money(x, s.kind) });
+    $('range-change').innerHTML = `${pctHtml(change)} <span class="muted">in ${label}</span>`;
+    view.querySelectorAll('[data-range]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === label)));
+  };
+  view.querySelectorAll('[data-range]').forEach((b) => {
+    const spec = RANGES.find(([l]) => l === b.dataset.range)[1];
+    if (rangeStart(dates, spec) < 0) { b.disabled = true; b.title = 'Not enough history'; }
+    b.addEventListener('click', () => drawRange(b.dataset.range));
+  });
+  const defaultRange = ['1Y', '6M', '3M', '1M', '1W'].find((l) => !view.querySelector(`[data-range="${l}"]`).disabled);
+  if (defaultRange) drawRange(defaultRange);
+
+  const chartBox = $('price-chart');
+  let lastWidth = chartBox.clientWidth;
+  const resize = new ResizeObserver(() => {
+    if (nav !== navToken) { resize.disconnect(); return; }
+    if (Math.abs(chartBox.clientWidth - lastWidth) < 24) return;
+    lastWidth = chartBox.clientWidth;
+    const current = view.querySelector('[data-range][aria-pressed="true"]')?.dataset.range;
+    if (current) drawRange(current);
+  });
+  resize.observe(chartBox);
+
+  // The slow part: forecast and full analysis.
+  let r;
+  try {
+    r = await api('/api/analyze', { symbol, period: '5y' });
+  } catch (err) {
+    if (nav !== navToken) return;
+    $('take-forecast').innerHTML = `<h3>Next 5 trading days</h3><p>The forecast couldn’t be calculated: ${esc(friendly(err))}</p>`;
+    $('advanced-body').innerHTML = errorHtml("Couldn't run the analysis", err);
+    return;
+  }
+  if (nav !== navToken) return;
+
+  const prediction = r.explain?.prediction;
+  if (prediction) {
+    $('take-forecast').innerHTML = `<h3>Next ${prediction.horizon_days || 5} trading days</h3>${predictionHtml(prediction)}`;
+  }
+  renderAdvanced($('advanced-body'), r);
+}
+
+/* ---------------- header search ---------------- */
+const searchInput = $('search');
 const suggestBox = $('suggest');
 let suggestions = [];
 let activeIndex = -1;
 let searchTimer = null;
+let searchSeq = 0;
 
 function closeSuggest() {
   suggestBox.hidden = true;
   suggestBox.innerHTML = '';
   suggestions = [];
   activeIndex = -1;
-  $('symbol').setAttribute('aria-expanded', 'false');
+  searchInput.setAttribute('aria-expanded', 'false');
+}
+
+function metaFor(r) {
+  if (r.kind === 'fund') return 'Mutual fund';
+  if (r.kind === 'index') return 'Index';
+  return [r.exchange, r.symbol.split('.')[0]].filter(Boolean).join(' · ');
 }
 
 function renderSuggest() {
-  if (!suggestions.length) {
-    suggestBox.innerHTML = '<li class="s-empty">No match. Try the ticker itself, e.g. RELIANCE.NS</li>';
-  } else {
-    suggestBox.innerHTML = suggestions.map((r, i) => `
-      <li role="option" data-i="${i}" aria-selected="${i === activeIndex}">
-        <span class="s-sym">${escHtml(r.symbol)}</span>
-        <span class="s-name">${escHtml(r.name)}</span>
-        <span class="s-kind">${escHtml(r.kind === 'fund' ? 'mutual fund' : r.exchange || r.kind)}</span>
-      </li>`).join('');
-  }
+  suggestBox.innerHTML = suggestions.length
+    ? suggestions.map((r, i) => `<li role="option" id="opt-${i}" data-i="${i}" aria-selected="${i === activeIndex}">
+        ${avatarHtml(r.symbol, r.name)}
+        <span class="s-text"><span class="s-name">${esc(r.name)}</span><span class="s-meta">${esc(metaFor(r))}</span></span>
+      </li>`).join('')
+    : '<li class="s-empty">Nothing matched. Try a company name like “Reliance” or “HDFC”.</li>';
   suggestBox.hidden = false;
-  $('symbol').setAttribute('aria-expanded', 'true');
+  searchInput.setAttribute('aria-expanded', 'true');
+  if (activeIndex >= 0) searchInput.setAttribute('aria-activedescendant', `opt-${activeIndex}`);
+  else searchInput.removeAttribute('aria-activedescendant');
 }
 
 function choose(i) {
   const hit = suggestions[i];
   if (!hit) return;
-  $('symbol').value = hit.symbol;
+  names.set(hit.symbol, hit.name);
+  searchInput.value = '';
   closeSuggest();
-  run();
+  searchInput.blur();
+  location.hash = `#/s/${enc(hit.symbol)}`;
 }
 
 suggestBox.addEventListener('mousedown', (e) => {
-  // mousedown, not click: blur would close the list before click lands.
+  // mousedown, not click: the input's blur would close the list first.
   const li = e.target.closest('li[data-i]');
   if (li) { e.preventDefault(); choose(Number(li.dataset.i)); }
 });
 
-$('symbol').addEventListener('input', () => {
-  const q = $('symbol').value.trim();
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.trim();
   clearTimeout(searchTimer);
   if (q.length < 2) { closeSuggest(); return; }
   searchTimer = setTimeout(async () => {
+    const seq = ++searchSeq;
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-      if (!res.ok) return closeSuggest();
-      suggestions = (await res.json()).results || [];
+      const body = await api('/api/search', { q, limit: 10 });
+      if (seq !== searchSeq) return; // a newer keystroke already answered
+      suggestions = body.results || [];
       activeIndex = -1;
       renderSuggest();
     } catch {
@@ -83,359 +565,24 @@ $('symbol').addEventListener('input', () => {
   }, 180);
 });
 
-$('symbol').addEventListener('keydown', (e) => {
-  if (suggestBox.hidden) {
-    if (e.key === 'Enter') run();
-    return;
-  }
+searchInput.addEventListener('keydown', (e) => {
+  if (suggestBox.hidden) return;
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
+    if (!suggestions.length) return;
     const step = e.key === 'ArrowDown' ? 1 : -1;
-    activeIndex = (activeIndex + step + suggestions.length) % (suggestions.length || 1);
+    activeIndex = (activeIndex + step + suggestions.length) % suggestions.length;
     renderSuggest();
     suggestBox.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    activeIndex >= 0 ? choose(activeIndex) : (closeSuggest(), run());
+    choose(activeIndex >= 0 ? activeIndex : 0);
   } else if (e.key === 'Escape') {
     closeSuggest();
   }
 });
+searchInput.addEventListener('blur', () => setTimeout(closeSuggest, 150));
 
-$('symbol').addEventListener('blur', () => setTimeout(closeSuggest, 120));
-
-/* ---------------- helpers ---------------- */
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-const title = (s) => String(s).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-
-function deltaClass(v) { return v > 0 ? 'up' : v < 0 ? 'down' : ''; }
-
-const TREND_STATUS = {
-  strong_uptrend: 'var(--good)', uptrend: 'var(--good)', range: 'var(--text-muted)',
-  downtrend: 'var(--critical)', strong_downtrend: 'var(--critical)', unknown: 'var(--text-muted)',
-};
-const VOL_STATUS = {
-  low: 'var(--good)', normal: 'var(--text-muted)', high: 'var(--warning)',
-  extreme: 'var(--critical)', unknown: 'var(--text-muted)',
-};
-
-function statusDot(color) { return `<span class="dot" style="background:${color}"></span>`; }
-
-/* ---------------- fetching ---------------- */
-let lastReport = null;
-
-async function run() {
-  const symbol = $('symbol').value.trim();
-  if (!symbol) return;
-
-  $('run').disabled = true;
-  $('report').hidden = true;
-  $('status').innerHTML = `<div class="notice"><span class="icon">⟳</span>
-    <span>Fetching ${esc(symbol)} and running walk-forward validation — this takes a few seconds.</span></div>`;
-
-  const params = new URLSearchParams({
-    symbol, period: $('period').value, provider: $('provider').value, horizon: $('horizon').value,
-  });
-
-  try {
-    const res = await fetch(`/api/analyze?${params}`);
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.detail || `request failed (${res.status})`);
-    $('status').innerHTML = '';
-    lastReport = body;
-    render(body);
-    $('report').hidden = false;
-  } catch (err) {
-    $('status').innerHTML = `<div class="notice error"><span class="icon">×</span>
-      <span>${esc(err.message)}</span></div>`;
-  } finally {
-    $('run').disabled = false;
-  }
-}
-
-$('run').addEventListener('click', run);
-
-/* ---------------- rendering ---------------- */
-function render(r) {
-  const s = r.series;
-  const fc = r.forecast;
-
-  $('report').innerHTML = `
-    ${r.data_warning ? `<div class="notice warn"><span class="icon">⚠</span><span>${esc(r.data_warning)}</span></div>` : ''}
-    ${tilesHtml(r)}
-    ${regimeHtml(r)}
-    <section class="panel">
-      <h2>${r.asset_kind === 'fund' ? 'NAV &amp; moving averages' : 'Price &amp; moving averages'}</h2>
-      <p class="sub">${esc(r.display_name || r.symbol)} · ${s.dates.length} sessions to ${esc(r.as_of)}. Shaded band = Bollinger (20, 2σ).</p>
-      <div class="legend" id="lg-price"></div>
-      <div class="chart" id="ch-price"></div>
-      ${r.has_volume ? '<h2 style="margin-top:18px">Volume</h2><div class="chart" id="ch-volume"></div>' : ''}
-    </section>
-    <div class="grid-2">
-      <section class="panel">
-        <h2>RSI (14)</h2>
-        <p class="sub">Above 70 is stretched, below 30 is washed out — in a strong trend it can stay pinned for weeks.</p>
-        <div class="chart" id="ch-rsi"></div>
-      </section>
-      <section class="panel">
-        <h2>MACD (12, 26, 9)</h2>
-        <p class="sub">Histogram is the gap between the MACD line and its signal.</p>
-        <div class="legend" id="lg-macd"></div>
-        <div class="chart" id="ch-macd"></div>
-        <div class="chart" id="ch-macdh"></div>
-      </section>
-    </div>
-    ${signalsHtml(r)}
-    ${backtestHtml(r)}
-    ${fc ? forecastHtml(fc) : forecastMissingHtml(r)}
-    ${tableHtml(r)}
-  `;
-
-  drawPrice(s);
-  if (r.has_volume) drawVolume(s);
-  drawRsi(s);
-  drawMacd(s);
-  drawEquity(r.backtest.equity);
-  if (fc) {
-    rangeBar($('ch-range'), {
-      low: fc.price_range.low, likelyLow: fc.price_range.likely_low, mid: fc.price_range.mid,
-      likelyHigh: fc.price_range.likely_high, high: fc.price_range.high, last: fc.last_close,
-    });
-  }
-}
-
-/* ---------------- sections ---------------- */
-function tilesHtml(r) {
-  return `<div class="tiles">
-    <div class="tile"><div class="label">Last close</div>
-      <div class="value">${fmtNum(r.last_close)}</div>
-      <div class="note">${r.asset_kind === 'fund' ? 'NAV · ' : ''}as of ${esc(r.as_of)}</div></div>
-    <div class="tile"><div class="label">1 day</div>
-      <div class="value ${deltaClass(r.change_1d)}">${fmtSignedPct(r.change_1d)}</div>
-      <div class="note">session change</div></div>
-    <div class="tile"><div class="label">1 month</div>
-      <div class="value ${deltaClass(r.change_21d)}">${fmtSignedPct(r.change_21d)}</div>
-      <div class="note">21 sessions</div></div>
-    <div class="tile"><div class="label">Signal bias</div>
-      <div class="value">${title(r.signal_score.bias)}</div>
-      <div class="note">${r.signal_score.bullish_count} bullish · ${r.signal_score.bearish_count} bearish</div></div>
-  </div>`;
-}
-
-function regimeHtml(r) {
-  const g = r.regime;
-  return `<section class="panel">
-    <h2>Market condition</h2>
-    <p class="sub">${esc(g.summary)}</p>
-    <div class="badges">
-      <span class="badge">${statusDot(TREND_STATUS[g.trend] || 'var(--text-muted)')}<span class="k">Trend</span><span class="v">${title(g.trend)}</span></span>
-      <span class="badge">${statusDot(VOL_STATUS[g.volatility] || 'var(--text-muted)')}<span class="k">Volatility</span><span class="v">${title(g.volatility)}</span></span>
-      <span class="badge"><span class="k">Momentum</span><span class="v">${title(g.momentum)}</span></span>
-      ${g.participation === 'not_applicable' ? '' :
-        `<span class="badge"><span class="k">Volume flow</span><span class="v">${title(g.participation)}</span></span>`}
-      <span class="badge"><span class="k">Drawdown</span><span class="v">${title(g.drawdown_state)}</span></span>
-    </div>
-    <p class="small muted">Regime is descriptive, not predictive: it tells you which playbook the
-    market is currently in, so a signal can be read in context rather than in isolation.</p>
-  </section>`;
-}
-
-function signalsHtml(r) {
-  const fired = r.signals.filter((s) => s.fired);
-  const body = fired.length
-    ? fired.map((s) => `<div class="signal">
-        <span class="mark" style="color:${s.direction === 'bullish' ? 'var(--good)' : 'var(--critical)'}">${s.direction === 'bullish' ? '▲' : '▼'}</span>
-        <span class="body"><span class="name">${esc(s.name)}</span>
-        <div class="detail">${esc(s.detail)}</div></span>
-        <span class="when">${s.bars_since === 0 ? 'today' : `${s.bars_since}d ago`}</span>
-      </div>`).join('')
-    : '<p class="small muted">No classic setup fired in the last 10 sessions.</p>';
-
-  return `<section class="panel">
-    <h2>Signals fired (last 10 sessions)</h2>
-    <p class="sub">Textbook rules, stated explicitly. A count of signals is not an edge — check the backtest below.</p>
-    ${body}
-  </section>`;
-}
-
-function backtestHtml(r) {
-  const m = r.backtest.metrics, b = r.backtest.benchmark_metrics;
-  const row = (label, key, pct = true) => `<tr><td>${label}</td>
-    <td>${pct ? fmtPct(m[key]) : fmtNum(m[key])}</td>
-    <td>${pct ? fmtPct(b[key]) : fmtNum(b[key])}</td></tr>`;
-  return `<section class="panel">
-    <h2>Trend-following backtest</h2>
-    <p class="sub">Long when price &gt; 200-day average and 50-day &gt; 200-day, flat otherwise.
-    Entered on the next bar, after commission and slippage. A yardstick, not a recommendation.</p>
-    <div class="legend" id="lg-equity"></div>
-    <div class="chart" id="ch-equity"></div>
-    <table style="margin-top:14px">
-      <thead><tr><th>Metric</th><th>Strategy</th><th>Buy &amp; hold</th></tr></thead>
-      <tbody>
-        ${row('Total return', 'total_return')}
-        ${row('CAGR', 'cagr')}
-        ${row('Volatility (ann.)', 'volatility')}
-        ${row('Sharpe', 'sharpe', false)}
-        ${row('Sortino', 'sortino', false)}
-        ${row('Max drawdown', 'max_drawdown')}
-        ${row('Win rate (active days)', 'win_rate')}
-        <tr><td>Trades</td><td>${r.backtest.trades}</td><td>1</td></tr>
-      </tbody>
-    </table>
-  </section>`;
-}
-
-function forecastMissingHtml(r) {
-  return `<section class="panel"><h2>Forecast</h2>
-    <p class="sub">Unavailable: ${esc(r.forecast_error || 'not requested')}</p>
-    <p class="small muted">Walk-forward validation needs a long history. Request more data and try again —
-    a model trained on too little history tells you about noise, not about the symbol.</p>
-  </section>`;
-}
-
-function forecastHtml(fc) {
-  const ev = fc.evaluation;
-  const cal = ev.calibration.length
-    ? `<table><thead><tr><th>Stated probability</th><th>Predicted</th><th>Actually happened</th><th>N</th></tr></thead>
-       <tbody>${ev.calibration.map((c) => `<tr><td>${c.bucket}</td><td>${fmtPct(c.predicted, 1)}</td>
-       <td>${fmtPct(c.actual, 1)}</td><td>${c.count}</td></tr>`).join('')}</tbody></table>`
-    : '<p class="small muted">Too few predictions per bucket to assess calibration.</p>';
-
-  const feats = fc.feature_importance.length
-    ? `<table><thead><tr><th>Feature</th><th>Importance</th></tr></thead><tbody>
-       ${fc.feature_importance.map((f) => `<tr><td>${esc(f.feature)}</td><td>${fmtNum(f.importance, 4)}</td></tr>`).join('')}
-       </tbody></table>`
-    : '<p class="small muted">No feature contributed measurably above noise.</p>';
-
-  return `<section class="panel">
-    <h2>Forecast — ${fc.horizon_days}-day horizon</h2>
-    <p class="sub">Probability that the close is higher in ${fc.horizon_days} sessions, from a model
-    validated walk-forward (trained only on the past at every step).</p>
-
-    <div class="prob-hero">
-      <span class="figure">${fmtPct(fc.probability_up, 1)}</span>
-      <span class="caption">chance of finishing higher.
-      Confidence: <strong>${esc(fc.confidence)}</strong>.</span>
-    </div>
-
-    <div class="verdict ${ev.has_edge ? 'has-edge' : 'no-edge'}">
-      <strong>${ev.has_edge ? '✓ Measurable edge' : '⚠ No demonstrated edge'}</strong> — ${esc(ev.verdict)}
-    </div>
-
-    <h2 style="margin-top:20px">Where the price plausibly lands</h2>
-    <p class="sub">Dark band = the middle 50% of comparable historical moves; light band = the middle 90%.
-    The dashed line is today's close.</p>
-    <div class="chart" id="ch-range"></div>
-
-    <div class="grid-2" style="margin-top:18px">
-      <div>
-        <h2>Out-of-sample scorecard</h2>
-        <table>
-          <tbody>
-            <tr><td>Predictions evaluated</td><td>${ev.n_predictions}</td></tr>
-            <tr><td>Accuracy</td><td>${fmtPct(ev.accuracy, 1)}</td></tr>
-            <tr><td>Base rate to beat</td><td>${fmtPct(ev.baseline_accuracy, 1)}</td></tr>
-            <tr><td><strong>Edge over base rate</strong></td><td><strong class="${deltaClass(ev.edge)}">${fmtSignedPct(ev.edge, 1)}</strong></td></tr>
-            <tr><td>ROC AUC</td><td>${fmtNum(ev.auc, 3)}</td></tr>
-            <tr><td>Brier score</td><td>${fmtNum(ev.brier, 4)}</td></tr>
-            <tr><td>Brier, base rate only</td><td>${fmtNum(ev.baseline_brier, 4)}</td></tr>
-          </tbody>
-        </table>
-        <p class="small muted" style="margin-top:8px">A Brier score above the base-rate row means the
-        model's probabilities are worse than simply quoting the historical average.</p>
-      </div>
-      <div>
-        <h2>Calibration</h2>
-        <p class="sub">When it says 70%, does 70% happen?</p>
-        ${cal}
-        <h2 style="margin-top:16px">What the model leans on</h2>
-        ${feats}
-      </div>
-    </div>
-
-    <p class="small muted" style="margin-top:16px">${esc(fc.caveat)}</p>
-  </section>`;
-}
-
-function tableHtml(r) {
-  const s = r.series;
-  const n = s.dates.length;
-  const rows = [];
-  for (let i = Math.max(0, n - 60); i < n; i++) {
-    rows.push(`<tr><td>${s.dates[i]}</td><td>${fmtNum(s.close[i])}</td>
-      <td>${fmtNum(s.sma_20?.[i])}</td><td>${fmtNum(s.sma_50?.[i])}</td>
-      <td>${fmtNum(s.sma_200?.[i])}</td><td>${fmtNum(s.rsi_14?.[i], 1)}</td>
-      ${r.has_volume ? `<td>${fmtNum(s.volume[i], 0)}</td>` : ''}</tr>`);
-  }
-  return `<section class="panel">
-    <h2>Data table — last 60 sessions</h2>
-    <p class="sub">The same numbers behind the charts, for readers who need values rather than shapes.</p>
-    <div class="table-scroll"><table>
-      <thead><tr><th>Date</th><th>Close</th><th>SMA 20</th><th>SMA 50</th><th>SMA 200</th><th>RSI</th>${r.has_volume ? '<th>Volume</th>' : ''}</tr></thead>
-      <tbody>${rows.reverse().join('')}</tbody>
-    </table></div>
-  </section>`;
-}
-
-/* ---------------- charts ---------------- */
-function drawPrice(s) {
-  const series = [
-    { label: 'Close', shortLabel: 'Close', values: s.close, color: S[1] },
-    { label: 'SMA 20', shortLabel: 'SMA20', values: s.sma_20, color: S[2] },
-    { label: 'SMA 50', shortLabel: 'SMA50', values: s.sma_50, color: S[3] },
-    { label: 'SMA 200', shortLabel: 'SMA200', values: s.sma_200, color: S[4] },
-  ];
-  legend($('lg-price'), series);
-  lineChart($('ch-price'), {
-    dates: s.dates, series, height: 300,
-    bands: [{ upper: s.bb_upper, lower: s.bb_lower, color: S[1], opacity: 0.08 }],
-  });
-}
-
-function drawVolume(s) {
-  barChart($('ch-volume'), {
-    dates: s.dates, values: s.volume, height: 110, color: S[1],
-    label: 'Volume', yFormat: (v) => fmtNum(v, 0),
-  });
-}
-
-function drawRsi(s) {
-  lineChart($('ch-rsi'), {
-    dates: s.dates, series: [{ label: 'RSI 14', shortLabel: 'RSI', values: s.rsi_14, color: S[1] }],
-    height: 190, width: 460, yMin: 0, yMax: 100, directLabels: false,
-    refLines: [
-      { value: 70, label: '70', color: 'var(--critical)' },
-      { value: 50, label: '50' },
-      { value: 30, label: '30', color: 'var(--good)' },
-    ],
-    yFormat: (v) => fmtNum(v, 0),
-  });
-}
-
-function drawMacd(s) {
-  const series = [
-    { label: 'MACD', shortLabel: 'MACD', values: s.macd, color: S[1] },
-    { label: 'Signal', shortLabel: 'Signal', values: s.macd_signal, color: S[2] },
-  ];
-  legend($('lg-macd'), series);
-  lineChart($('ch-macd'), { dates: s.dates, series, height: 150, width: 460, yFormat: (v) => fmtNum(v, 2) });
-  barChart($('ch-macdh'), {
-    dates: s.dates, values: s.macd_hist, height: 90, width: 460,
-    color: S[1], negativeColor: S[2], label: 'Histogram',
-  });
-}
-
-function drawEquity(eq) {
-  const series = [
-    { label: 'Trend strategy', shortLabel: 'Strategy', values: eq.strategy, color: S[1] },
-    { label: 'Buy & hold', shortLabel: 'B&H', values: eq.benchmark, color: S[2] },
-  ];
-  legend($('lg-equity'), series);
-  lineChart($('ch-equity'), {
-    dates: eq.dates, series, height: 240, yFormat: (v) => fmtNum(v, 0),
-  });
-}
-
-run();
+/* ---------------- start ---------------- */
+syncDemoUI();
+route();

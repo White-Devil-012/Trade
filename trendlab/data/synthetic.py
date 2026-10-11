@@ -13,16 +13,19 @@ import pandas as pd
 
 from .base import PriceHistory, normalize
 
-_PERIOD_TO_DAYS = {
-    "1y": 252, "2y": 504, "3y": 756, "5y": 1260, "10y": 2520, "max": 2520,
-}
+# Calendar years, like a real download: a "5y" request covers five calendar
+# years of weekdays (~1,305 bars), not a fixed bar count.
+_PERIOD_TO_YEARS = {"1y": 1, "2y": 2, "3y": 3, "5y": 5, "10y": 10, "max": 10}
 
 
 class SyntheticProvider:
     name = "synthetic"
 
     def history(self, symbol: str, period: str = "5y", interval: str = "1d") -> PriceHistory:
-        n = _PERIOD_TO_DAYS.get(period, 1260)
+        end = pd.Timestamp.today().normalize()
+        years = _PERIOD_TO_YEARS.get(period, 5)
+        index = pd.bdate_range(start=end - pd.DateOffset(years=years) + pd.Timedelta(days=1), end=end)
+        n = len(index)
         # An "MF:" symbol yields a NAV-shaped series (no OHLC spread, no
         # volume), so the mutual fund path is exercisable with no network.
         as_fund = str(symbol).strip().upper().startswith("MF:")
@@ -56,7 +59,6 @@ class SyntheticProvider:
         low = body_lo * (1 - np.abs(rng.normal(0, 0.004, n)))
         volume = rng.lognormal(mean=14.0, sigma=0.35, size=n) * (1 + 3 * np.abs(daily_ret))
 
-        index = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n)
         if as_fund:
             nan = np.full(n, np.nan)
             frame = pd.DataFrame(

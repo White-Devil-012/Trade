@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from . import backtest, model, regime, signals
+from . import backtest, explain, model, regime, signals
 from .config import AppConfig
 from .data import get_provider, resolve_provider_name
 from .indicators import enrich
@@ -36,16 +36,6 @@ def _series_payload(frame: pd.DataFrame, tail: int = 500) -> dict[str, Any]:
     return payload
 
 
-def _display_name(source, symbol: str) -> str:
-    """A human-readable name where the provider offers one."""
-    if getattr(source, "name", "") == "amfi":
-        try:
-            return source.meta(symbol).get("scheme_name") or symbol.upper()
-        except Exception:
-            return symbol.upper()
-    return symbol.upper()
-
-
 def analyze(
     symbol: str,
     period: str | None = None,
@@ -68,11 +58,13 @@ def analyze(
     raw = source.history(symbol, period=period or cfg.default_period)
     frame = enrich(raw)
 
-    # Read the asset class off the data, not the provider: a NAV series has no
-    # traded volume, so its volume-derived features and the
-    # accumulation/distribution label do not apply. Deriving it here means any
-    # provider that returns NAV-shaped bars is handled correctly.
-    has_volume = bool(raw["volume"].notna().any())
+    # Read the asset class off the data, not the provider: a NAV series and an
+    # index with all-zero volume both lack usable volume, so their
+    # volume-derived features and the accumulation/distribution label do not
+    # apply. See market.asset_profile.
+    from .market import asset_profile, display_name, quote_summary
+
+    kind, has_volume = asset_profile(symbol, raw)
 
     current_regime = regime.classify(frame, has_volume=has_volume)
     fired = signals.evaluate(frame)
@@ -81,8 +73,8 @@ def analyze(
 
     report: dict[str, Any] = {
         "symbol": symbol.upper(),
-        "display_name": _display_name(source, symbol),
-        "asset_kind": "fund" if not has_volume else "equity",
+        "display_name": display_name(source, symbol),
+        "asset_kind": kind,
         "has_volume": has_volume,
         "provider": source.name,
         "period": period or cfg.default_period,
@@ -112,6 +104,12 @@ def analyze(
         except ValueError as exc:
             report["forecast_error"] = str(exc)
 
+    quote = quote_summary(raw, kind, has_volume)
+    report["explain"] = {
+        "mood": explain.mood(report["regime"], quote["below_52w_high"]),
+        "prediction": explain.prediction(report["forecast"], kind, report["forecast_error"])
+        if include_forecast else None,
+    }
     return report
 
 

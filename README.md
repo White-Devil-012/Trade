@@ -53,18 +53,33 @@ python -m trendlab serve
 # → http://127.0.0.1:8000
 ```
 
-Enter a symbol, pick a history window and a forecast horizon, hit **Analyze**.
+It works like an investing app such as Groww, minus the buying and selling:
 
-No network? Switch **Source** to *Synthetic (demo)* — it generates random
-regime-switching bars so you can explore every panel offline. Those bars describe no
-real market, and the app labels them as such.
+- **Home**: NIFTY 50, SENSEX and NIFTY Bank at the top, the day's top gainers and
+  losers, and popular stocks with their price, today's change and a one-month line.
+- **Search by name**: type "Reliance", "HDFC" or "Tata" in the bar at the top. You
+  never need to know a ticker.
+- **Stock page**: the price and today's change, a chart with 1W to 5Y ranges, returns,
+  today's and 52-week ranges, and **Our take**: what the trend looks like right now and
+  the model's 5-day forecast, in plain English, with its track record in the same
+  sentence. When the model has been no better than guessing for that stock, it says so.
+- **Mutual funds** tab: search any AMFI-listed scheme by name or pick a category. A fund
+  page shows its NAV, returns (3Y and 5Y per year, the way funds quote them) and the
+  same plain-English take.
+- **Advanced analysis**, folded away at the bottom of each page: indicators, signals,
+  the strategy backtest and the model's full scorecard.
+
+No network? Tick **Demo data** in the footer. It generates random prices so every
+screen works offline, and a yellow banner says the prices are made up for as long as
+it is on. Demo mutual funds have deliberately fictional names ("Demo Flexi Cap Fund"),
+so a random NAV never appears under a real fund's name.
 
 ## Use the CLI
 
 ```bash
 python -m trendlab search hdfc                          # find a symbol or fund
 python -m trendlab analyze RELIANCE.NS                  # full report
-python -m trendlab analyze MF:118834                    # a mutual fund, by AMFI code
+python -m trendlab analyze MF:<scheme code>             # a mutual fund; get the code from search
 python -m trendlab analyze ^NSEI --horizon 21           # 21-day forecast on NIFTY 50
 python -m trendlab analyze TCS.NS --no-forecast         # skip the slow part
 python -m trendlab screen RELIANCE.NS INFY.NS TCS.NS    # compare several
@@ -101,8 +116,11 @@ python -m trendlab search hdfc bank
 SYMBOL          KIND     WHERE   NAME
 HDFCBANK.NS     equity   NSE     HDFC Bank
 ^NSEBANK        index    INDEX   NIFTY Bank
-MF:118834       fund     AMFI    HDFC Top 100 Fund - Growth
+ICICIBANK.NS    equity   NSE     ICICI Bank
 ```
+
+With a connection, matching mutual funds appear too, as `MF:<scheme code>` rows
+carrying AMFI's scheme name. Pass that symbol to `analyze`.
 
 ### Funds are not stocks
 
@@ -185,7 +203,7 @@ was discovered. `test_reports_no_edge_on_random_data` enforces that.
 
 ```bash
 pip install pytest httpx
-python -m pytest tests/ -q     # 101 tests
+python -m pytest tests/ -q     # 135 tests
 ```
 
 ## Layout
@@ -195,6 +213,8 @@ trendlab/
   config.py         tunable defaults (costs, horizon, retrain cadence)
   data/             providers: yahoo (cached), amfi (fund NAVs), synthetic (offline)
   search.py         symbol + scheme search, with an offline Indian index
+  market.py         home-screen quotes, stock snapshots, returns (fast, no model)
+  explain.py        the plain-English "Our take" text
   indicators.py     SMA/EMA/RSI/MACD/Bollinger/ATR/ADX/Stochastic/OBV — all causal
   features.py       22-feature matrix + forward-return target
   regime.py         market-condition classification
@@ -203,8 +223,8 @@ trendlab/
   model.py          walk-forward validation, calibration, forecasting
   analysis.py       orchestration — one symbol in, one report out
   cli.py            command-line interface
-  server/           FastAPI backend + dependency-free SVG dashboard
-tests/              101 tests, concentrated on lookahead and backtest integrity
+  server/           FastAPI backend + dependency-free SVG front end
+tests/              135 tests, concentrated on lookahead and backtest integrity
 ```
 
 The dashboard's charts are hand-rolled SVG with no CDN dependency, so the app works

@@ -374,3 +374,131 @@ export function legend(container, items) {
     .map((i) => `<span class="item"><span class="swatch" style="background:${i.color}"></span>${i.label}</span>`)
     .join('');
 }
+
+/* ---------------- consumer screens ---------------- */
+
+const INR = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2, minimumFractionDigits: 2 });
+const IN2 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+const IN0 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** ₹1,23,456.78 — rupees with Indian digit grouping. */
+export function fmtINR(v) {
+  return v === null || v === undefined || Number.isNaN(v) ? '—' : INR.format(v);
+}
+
+/** 24,567.85 — an index level, which is points, not rupees. */
+export function fmtIN(v, digits = 2) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  return digits === 0 ? IN0.format(v) : IN2.format(v);
+}
+
+/** "9 Oct 2026" from an ISO date. */
+export function fmtDate(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  return y && m && d ? `${d} ${MONTHS[m - 1]} ${y}` : String(iso);
+}
+
+let gradientSeq = 0;
+
+/**
+ * The stock-page price chart: one line, an area fading to nothing beneath it,
+ * and a dashed line at the price where the selected range began, so "up or
+ * down over this range" reads at a glance. Colour follows that direction, and
+ * the signed change beside the chart says the same thing in text.
+ */
+export function priceChart(container, { dates, values, up, format = fmtINR, height = 300 }) {
+  container.innerHTML = '';
+  const tooltip = document.createElement('div');
+  tooltip.className = 'tooltip';
+  container.appendChild(tooltip);
+
+  // Draw at the container's real width: a fixed viewBox scaled down to a
+  // phone would shrink the axis labels to unreadable sizes.
+  const W = Math.max(300, Math.round(container.clientWidth || 700));
+  const H = W < 520 ? Math.round(height * 0.78) : height;
+  const M = { top: 14, right: 70, bottom: 28, left: 6 };
+  const plotW = W - M.left - M.right;
+  const plotH = H - M.top - M.bottom;
+  const n = values.length;
+  const color = up ? 'var(--up-mark)' : 'var(--down-mark)';
+
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img',
+    'aria-label': `Price chart, ${fmtDate(dates[0])} to ${fmtDate(dates[n - 1])}` });
+  container.appendChild(svg);
+
+  let lo = Math.min(...values), hi = Math.max(...values);
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const pad = (hi - lo) * 0.08;
+  const y0 = lo - pad, y1 = hi + pad;
+  const X = (i) => M.left + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const Y = (v) => M.top + plotH - ((v - y0) / (y1 - y0)) * plotH;
+
+  // Recessive grid, labels on the right where the eye ends up.
+  for (const t of niceTicks(y0, y1, 4)) {
+    const yy = Y(t);
+    if (yy < M.top || yy > M.top + plotH) continue;
+    svg.appendChild(el('line', { class: 'grid-line', x1: M.left, x2: M.left + plotW, y1: yy, y2: yy }));
+    const label = el('text', { class: 'tick-label price-tick', x: M.left + plotW + 8, y: yy + 4 });
+    label.textContent = format(t).replace('.00', '');
+    svg.appendChild(label);
+  }
+
+  const id = `pg${++gradientSeq}`;
+  const defs = el('defs');
+  const grad = el('linearGradient', { id, x1: 0, y1: 0, x2: 0, y2: 1 });
+  grad.appendChild(el('stop', { offset: '0%', style: `stop-color:${color};stop-opacity:0.22` }));
+  grad.appendChild(el('stop', { offset: '100%', style: `stop-color:${color};stop-opacity:0` }));
+  defs.appendChild(grad);
+  svg.appendChild(defs);
+
+  const line = values.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
+  svg.appendChild(el('path', {
+    d: `${line}L${X(n - 1).toFixed(1)},${M.top + plotH}L${X(0).toFixed(1)},${M.top + plotH}Z`,
+    fill: `url(#${id})`, stroke: 'none',
+  }));
+
+  // Where the range started: above it is a gain over the range, below a loss.
+  svg.appendChild(el('line', {
+    x1: M.left, x2: M.left + plotW, y1: Y(values[0]), y2: Y(values[0]),
+    stroke: 'var(--text-muted)', 'stroke-width': 1, 'stroke-dasharray': '3 4',
+  }));
+  svg.appendChild(el('path', { class: 'series-line', d: line, stroke: color }));
+  svg.appendChild(el('circle', {
+    cx: X(n - 1), cy: Y(values[n - 1]), r: 4, fill: color, class: 'hover-dot',
+  }));
+
+  for (const i of [0, n - 1]) {
+    const t = el('text', { class: 'tick-label price-tick', x: X(i), y: H - 8, 'text-anchor': i === 0 ? 'start' : 'end' });
+    t.textContent = fmtDate(dates[i]);
+    svg.appendChild(t);
+  }
+
+  attachCrosshair({
+    svg, container, tooltip, dates: dates.map(fmtDate),
+    series: [{ label: 'Price', values, color }],
+    X, Y, M, plotW, plotH, n, yFormat: format, W,
+  });
+  return svg;
+}
+
+/** A tiny trend line for a stock card: no axes, an emphasised last point. */
+export function sparkline(container, values, up) {
+  container.innerHTML = '';
+  if (!values || values.length < 2) return null;
+  const W = 120, H = 36, P = 3;
+  const lo = Math.min(...values), hi = Math.max(...values);
+  const span = hi - lo || 1;
+  const X = (i) => P + (i / (values.length - 1)) * (W - 2 * P);
+  const Y = (v) => H - P - ((v - lo) / span) * (H - 2 * P);
+  const color = up ? 'var(--up-mark)' : 'var(--down-mark)';
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, 'aria-hidden': 'true', preserveAspectRatio: 'none' });
+  svg.appendChild(el('polyline', {
+    points: values.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' '),
+    fill: 'none', stroke: color, 'stroke-width': 1.75, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    'vector-effect': 'non-scaling-stroke',
+  }));
+  svg.appendChild(el('circle', { cx: X(values.length - 1), cy: Y(values[values.length - 1]), r: 2.5, fill: color }));
+  container.appendChild(svg);
+  return svg;
+}

@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..analysis import analyze, compare
+from ..market import market_overview, stock_snapshot
 from ..search import search as symbol_search
 from ..config import AppConfig
 from ..data.base import DataError
@@ -73,11 +74,54 @@ def api_screen(
     return {"rows": compare(tickers, period, provider, AppConfig())}
 
 
+def _upstream_error(exc: Exception) -> HTTPException:
+    """Turn a data-feed failure into a message a person can act on."""
+    if isinstance(exc, DataError):
+        return HTTPException(status_code=404, detail=str(exc))
+    return HTTPException(
+        status_code=502,
+        detail=(
+            f"could not reach the market data provider: {str(exc).rstrip('.')}. Check your "
+            f"network, or turn on Demo data to explore the app offline."
+        ),
+    )
+
+
+@app.get("/api/market")
+def api_market(
+    provider: str = Query("auto", pattern=r"^(auto|yahoo|synthetic)$"),
+) -> dict[str, Any]:
+    """Indices and popular stocks for the home screen."""
+    try:
+        return market_overview(provider)
+    except (DataError, ConnectionError, TimeoutError, OSError) as exc:
+        raise _upstream_error(exc) from exc
+
+
+@app.get("/api/stock")
+def api_stock(
+    symbol: str = Query(..., min_length=1, max_length=24),
+    provider: str = Query("auto", pattern=r"^(auto|yahoo|amfi|synthetic)$"),
+) -> dict[str, Any]:
+    """Price, chart history, returns and market mood for one stock or fund.
+
+    Fast on purpose. The forecast comes from /api/analyze, which takes seconds.
+    """
+    try:
+        return stock_snapshot(symbol.strip(), provider)
+    except (DataError, ConnectionError, TimeoutError, OSError) as exc:
+        raise _upstream_error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not load {symbol}: {exc}") from exc
+
+
 @app.get("/api/search")
 def api_search(
     q: str = Query(..., min_length=2, max_length=64),
     limit: int = Query(15, ge=1, le=40),
     funds: bool = Query(True),
+    kind: str = Query("all", pattern=r"^(all|fund|equity)$"),
+    provider: str = Query("auto", pattern=r"^(auto|yahoo|amfi|synthetic)$"),
 ) -> dict[str, Any]:
     """Find a symbol or mutual fund scheme by name or ticker.
 
@@ -85,7 +129,12 @@ def api_search(
     search endpoints are unreachable -- the builtin index is matched locally.
     """
     try:
-        hits = symbol_search(q.strip(), limit=limit, include_funds=funds)
+        hits = symbol_search(
+            q.strip(), limit=limit,
+            include_funds=funds and kind != "equity",
+            include_equities=kind != "fund",
+            demo=provider == "synthetic",
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"search failed: {exc}") from exc
     return {"query": q.strip(), "results": [h.to_dict() for h in hits]}

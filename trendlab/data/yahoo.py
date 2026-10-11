@@ -71,6 +71,46 @@ class YahooProvider:
         return frame
 
 
+def _history_many(self, symbols: list[str], period: str = "3mo", interval: str = "1d"):
+    """Fetch several symbols in one Yahoo request, falling back per symbol.
+
+    One batched request instead of one per symbol matters once this runs on a
+    cloud host, where Yahoo rate-limits hard. Anything the batch misses is
+    retried individually, so a partial batch still fills in.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ..market import split_download
+
+    frames: dict = {}
+    try:
+        import yfinance as yf
+
+        raw = yf.download(symbols, period=period, interval=interval, auto_adjust=True,
+                          group_by="ticker", threads=True, progress=False)
+        frames = split_download(raw, symbols)
+    except Exception:
+        frames = {}
+
+    missing = [s for s in symbols if s not in frames]
+
+    def one(symbol: str):
+        try:
+            return symbol, self.history(symbol, period=period, interval=interval)
+        except Exception:
+            return symbol, None
+
+    if missing:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for symbol, frame in pool.map(one, missing):
+                if frame is not None and len(frame):
+                    frames[symbol] = frame
+    return frames
+
+
+YahooProvider.history_many = _history_many
+
+
 def resolve_provider_name(symbol: str, provider: str = "auto") -> str:
     """Pick a provider for a symbol.
 

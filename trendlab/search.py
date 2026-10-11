@@ -54,6 +54,36 @@ BUILTIN_INDIA: list[tuple[str, str, str]] = [
 ]
 
 
+# Display names for the builtin list, so a ticker can always be shown as a name.
+_NAMES = {symbol: name for symbol, name, _ in BUILTIN_INDIA}
+
+# Demo mode's mutual funds. The names are deliberately fictional: demo prices
+# are random, and a random NAV under a real fund's name reads as a real NAV.
+DEMO_FUNDS: list[dict[str, str]] = [
+    {"code": "900001", "name": "Demo Nifty 50 Index Fund - Growth"},
+    {"code": "900002", "name": "Demo Flexi Cap Fund - Growth"},
+    {"code": "900003", "name": "Demo Small Cap Fund - Growth"},
+    {"code": "900004", "name": "Demo Mid Cap Fund - Growth"},
+    {"code": "900005", "name": "Demo ELSS Tax Saver Fund - Growth"},
+    {"code": "900006", "name": "Demo Liquid Fund - Growth"},
+    {"code": "900007", "name": "Demo Large Cap Fund - Growth"},
+    {"code": "900008", "name": "Demo Balanced Advantage Fund - Growth"},
+]
+
+
+def lookup_name(symbol: str) -> str | None:
+    """Company or index name for a known symbol, else None."""
+    key = str(symbol).strip().upper()
+    if key in _NAMES:
+        return _NAMES[key]
+    if key.startswith("MF:"):
+        code = key.removeprefix("MF:")
+        for fund in DEMO_FUNDS:
+            if fund["code"] == code:
+                return fund["name"]
+    return None
+
+
 @dataclass(frozen=True)
 class SearchResult:
     symbol: str
@@ -189,28 +219,43 @@ def search_funds(query: str, schemes: Iterable[dict[str, str]], limit: int = 10)
 
 
 def search(query: str, limit: int = 15, include_funds: bool = True,
-           india_only: bool = True, cache_dir: str = ".cache/trendlab") -> list[SearchResult]:
+           india_only: bool = True, cache_dir: str = ".cache/trendlab",
+           include_equities: bool = True, demo: bool = False) -> list[SearchResult]:
     """Search everything, best matches first.
 
     The builtin index answers first and always; network sources only add to it.
+    ``demo`` stays fully offline and swaps real fund schemes for DEMO_FUNDS.
     """
     query = (query or "").strip()
     if len(query) < 2:
         return []
 
-    results: list[SearchResult] = list(search_builtin(query, limit))
+    results: list[SearchResult] = []
+    if include_equities:
+        results.extend(search_builtin(query, limit))
     seen = {r.symbol for r in results}
 
-    for hit in search_yahoo(query, limit, india_only):
-        if hit.symbol not in seen:
-            seen.add(hit.symbol)
-            results.append(hit)
+    if demo:
+        if include_funds:
+            for hit in search_funds(query, DEMO_FUNDS, limit=8):
+                if hit.symbol not in seen:
+                    seen.add(hit.symbol)
+                    results.append(hit)
+        results.sort(key=lambda r: -r.score)
+        return results[:limit]
+
+    if include_equities:
+        for hit in search_yahoo(query, limit, india_only):
+            if hit.symbol not in seen:
+                seen.add(hit.symbol)
+                results.append(hit)
 
     if include_funds:
         try:
             from .data.amfi import AmfiProvider
 
-            for hit in search_funds(query, AmfiProvider(cache_dir).schemes(), limit=8):
+            fund_limit = limit if not include_equities else 8
+            for hit in search_funds(query, AmfiProvider(cache_dir).schemes(), limit=fund_limit):
                 if hit.symbol not in seen:
                     seen.add(hit.symbol)
                     results.append(hit)

@@ -8,64 +8,43 @@
 <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-<header>
-  <div class="header-inner">
-    <div class="brand">
-      <h1>TrendLab</h1>
-      <p>Trend analysis, market-regime detection and probabilistic forecasting</p>
-    </div>
-    <div class="field search-field">
-      <label for="symbol">Symbol or fund</label>
-      <input id="symbol" value="RELIANCE.NS" placeholder="Reliance, HDFC, NIFTY…"
-             autocomplete="off" role="combobox" aria-expanded="false"
-             aria-controls="suggest" aria-autocomplete="list" />
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="logo" href="#/" aria-label="TrendLab home">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 12l4-5 3 3 4-7 3 4" /></svg>
+      <span>TrendLab</span>
+    </a>
+    <div class="search-field">
+      <input id="search" type="search" placeholder="Search stocks, indices and mutual funds"
+             autocomplete="off" role="combobox" aria-expanded="false" aria-controls="suggest"
+             aria-autocomplete="list" aria-label="Search stocks, indices and mutual funds" />
       <ul id="suggest" class="suggest" role="listbox" hidden></ul>
     </div>
-    <div class="field">
-      <label for="period">History</label>
-      <select id="period">
-        <option value="2y">2 years</option>
-        <option value="3y">3 years</option>
-        <option value="5y" selected>5 years</option>
-        <option value="10y">10 years</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="horizon">Horizon</label>
-      <select id="horizon">
-        <option value="1">1 day</option>
-        <option value="5" selected>5 days</option>
-        <option value="10">10 days</option>
-        <option value="21">21 days</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="provider">Source</label>
-      <select id="provider">
-        <option value="auto" selected>Live data</option>
-        <option value="synthetic">Demo data</option>
-      </select>
-    </div>
-    <div class="actions">
-      <button id="run">Analyze</button>
-      <button id="theme" class="ghost" title="Toggle light / dark">◐</button>
-    </div>
+    <button id="theme" class="icon-btn" type="button" aria-label="Switch between light and dark">◐</button>
   </div>
 </header>
 
-<div class="wrap">
-  <div class="notice">
-    <span class="icon" aria-hidden="true">!</span>
-    <span><strong>Research tooling, not financial advice.</strong> Every number here is
-    derived from past prices. Markets are not obliged to repeat themselves — treat the
-    forecast as a probability with a track record attached, never as a price target.</span>
+<div id="demo-banner" class="demo-banner" role="status" hidden>
+  <div class="demo-inner">
+    <strong>Demo mode.</strong>
+    <span>These prices are made up, not real market data.</span>
+    <button id="demo-off" class="link-btn" type="button">Show live prices</button>
   </div>
-
-  <div id="status"></div>
-  <main id="report" hidden></main>
 </div>
 
-<footer>TrendLab · built for analysis, not for certainty</footer>
+<main id="view" class="wrap" tabindex="-1"></main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <p>TrendLab is a research tool, not financial advice. It cannot buy or sell anything.
+    Prices may be delayed, and past patterns do not predict future prices.</p>
+    <label class="toggle">
+      <input type="checkbox" id="demo-toggle" />
+      <span>Demo data <span class="muted">— works offline, prices are made up</span></span>
+    </label>
+  </div>
+</footer>
+
 <script type="module" src="/static/app.js"></script>
 </body>
 </html>
